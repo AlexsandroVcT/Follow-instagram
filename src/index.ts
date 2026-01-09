@@ -23,7 +23,7 @@ process.on('SIGINT', () => {
     /**
      * 1️⃣ Inicia navegador com perfil persistente
      */
-    const { page } = await BrowserManager.launch();
+    const { page, context } = await BrowserManager.launch();
     Logger.success('Chrome iniciado com perfil Picatoc');
 
     /**
@@ -36,11 +36,15 @@ process.on('SIGINT', () => {
     });
 
     /**
-     * 3️⃣ Validação REAL de sessão
+     * 3️⃣ Validação REAL de sessão (BLINDADA)
      */
-    await SessionValidator.waitForLogin(page);
+    await SessionValidator.waitForLogin(page, context);
 
     if (!Runtime.running) return;
+
+    // Pequena estabilização pós-login (humana)
+    await page.waitForLoadState('domcontentloaded');
+    await HumanDelay.random(1500, 3000);
 
     Logger.success('Sessão validada, pronto para ações humanas!');
 
@@ -105,8 +109,7 @@ process.on('SIGINT', () => {
     }
 
     /**
-     * ✅ CLIQUE HUMANO REAL (CORREÇÃO CRÍTICA)
-     * Instagram NÃO aceita element.click()
+     * 8️⃣ CLIQUE HUMANO REAL
      */
     const box = await followersClickable.boundingBox();
 
@@ -132,7 +135,7 @@ process.on('SIGINT', () => {
     Logger.wait('Abrindo modal de seguidores...');
 
     /**
-     * 8️⃣ Aguarda modal REAL
+     * 9️⃣ Aguarda modal REAL
      */
     const modal = await page.waitForSelector('div[role="dialog"]', {
       timeout: 60000,
@@ -146,7 +149,7 @@ process.on('SIGINT', () => {
     Logger.success('Modal de seguidores aberto com sucesso!');
 
     /**
-     * 9️⃣ Scroll humano inicial
+     * 🔟 Scroll humano inicial
      */
     await HumanScroll.random(page, 3);
     await HumanDelay.random(1500, 3000);
@@ -154,7 +157,7 @@ process.on('SIGINT', () => {
     if (!Runtime.running) return;
 
     /**
-     * 🔟 Follow Ultra-Human
+     * 1️⃣1️⃣ Follow Ultra-Human
      */
     const dailyLimit = 50;
 
