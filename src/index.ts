@@ -1,11 +1,12 @@
 import { BrowserManager } from './core/BrowserManager/BrowserManager';
-import { Logger } from './core/Logger/Logger';
+import { Logger } from '../src/core/Logger/Logger';
 import { FollowActionUltraHuman } from './core/Actions/FollowUltraHuman';
 import { HumanDelay } from './core/Human/HumanDelay';
 import { HumanScroll } from './core/Human/HumanScroll';
 import { SessionValidator } from './core/session/SessionValidator';
 import { Runtime } from './core/System/Runtime';
-import { ElementHandle } from 'playwright';
+import { ElementHandle, Page } from 'playwright';
+import { HumanClock } from './core/Human/HumanClock';
 
 /**
  * 🛑 Encerramento manual seguro (Ctrl + C)
@@ -27,7 +28,7 @@ process.on('SIGINT', () => {
     Logger.success('Chrome iniciado com perfil Picatoc');
 
     /**
-     * 2️⃣ Abre Instagram (SEM networkidle)
+     * 2️⃣ Abre Instagram
      */
     Logger.action('Abrindo Instagram...');
     await page.goto('https://www.instagram.com/', {
@@ -36,13 +37,11 @@ process.on('SIGINT', () => {
     });
 
     /**
-     * 3️⃣ Validação REAL de sessão (BLINDADA)
+     * 3️⃣ Validação REAL de sessão
      */
     await SessionValidator.waitForLogin(page, context);
 
     if (!Runtime.running) return;
-
-    // Pequena estabilização pós-login (humana)
     await page.waitForLoadState('domcontentloaded');
     await HumanDelay.random(1500, 3000);
 
@@ -53,7 +52,6 @@ process.on('SIGINT', () => {
      */
     const targetProfile = 'maceioalagoas';
     Logger.action(`Abrindo perfil: @${targetProfile}`);
-
     await page.goto(`https://www.instagram.com/${targetProfile}/`, {
       waitUntil: 'domcontentloaded',
       timeout: 60000,
@@ -66,14 +64,12 @@ process.on('SIGINT', () => {
     await HumanDelay.random(2000, 4000);
 
     if (!Runtime.running) return;
-
     Logger.success('Perfil carregado com sucesso!');
 
     /**
      * 6️⃣ Localiza TEXTO "seguidores"
      */
     Logger.action('Localizando botão de seguidores...');
-
     const followersText = await page.waitForSelector(
       'span:has-text("seguidores")',
       { timeout: 30000 }
@@ -89,20 +85,14 @@ process.on('SIGINT', () => {
      */
     const followersClickableHandle = await followersText.evaluateHandle(el => {
       let current: HTMLElement | null = el as HTMLElement;
-
       while (current) {
-        if (current.tagName === 'A' || current.tagName === 'BUTTON') {
-          return current;
-        }
+        if (current.tagName === 'A' || current.tagName === 'BUTTON') return current;
         current = current.parentElement;
       }
-
       return null;
     });
 
-    const followersClickable =
-      followersClickableHandle.asElement() as ElementHandle<HTMLElement> | null;
-
+    const followersClickable = followersClickableHandle.asElement() as ElementHandle<HTMLElement> | null;
     if (!followersClickable || !Runtime.running) {
       Logger.error('Elemento clicável de seguidores não encontrado.');
       return;
@@ -112,7 +102,6 @@ process.on('SIGINT', () => {
      * 8️⃣ CLIQUE HUMANO REAL
      */
     const box = await followersClickable.boundingBox();
-
     if (!box) {
       Logger.error('BoundingBox do botão seguidores não encontrada.');
       return;
@@ -120,13 +109,7 @@ process.on('SIGINT', () => {
 
     await followersClickable.scrollIntoViewIfNeeded();
     await HumanDelay.random(400, 900);
-
-    await page.mouse.move(
-      box.x + box.width / 2,
-      box.y + box.height / 2,
-      { steps: 18 }
-    );
-
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 18 });
     await HumanDelay.random(120, 260);
     await page.mouse.down();
     await HumanDelay.random(90, 180);
@@ -137,10 +120,7 @@ process.on('SIGINT', () => {
     /**
      * 9️⃣ Aguarda modal REAL
      */
-    const modal = await page.waitForSelector('div[role="dialog"]', {
-      timeout: 60000,
-    });
-
+    const modal = await page.waitForSelector('div[role="dialog"]', { timeout: 60000 });
     if (!modal || !Runtime.running) {
       Logger.error('Modal de seguidores não foi carregado.');
       return;
@@ -157,18 +137,39 @@ process.on('SIGINT', () => {
     if (!Runtime.running) return;
 
     /**
-     * 1️⃣1️⃣ Follow Ultra-Human
+     * 1️⃣1️⃣ Follow Ultra-Human com intervalo dinâmico e limite diário
      */
     const dailyLimit = 500;
+    Logger.action(`▶️ Iniciando Follow Ultra-Human com limite diário: ${dailyLimit}`);
 
-    const totalFollowed = await FollowActionUltraHuman.execute(
-      modal as ElementHandle<HTMLElement>,
-      dailyLimit
-    );
+    // Reset stats antes de iniciar a sessão
+    FollowActionUltraHuman['stats'] = { 
+      followed: 0, 
+      requested: 0, 
+      skipped: 0,
+      seguindoProcessed: 0,
+      solicitadoProcessed: 0
+    };
 
-    Logger.success(`Total de usuários seguidos nesta sessão: ${totalFollowed}`);
+    while (Runtime.running && HumanClock.canFollow(dailyLimit)) {
+      // Executa o follow **uma vez por ciclo** para log imediato
+      const result = await FollowActionUltraHuman.execute(modal as ElementHandle<HTMLElement>, dailyLimit);
+
+      // Log detalhado **imediatamente após cada usuário**
+      Logger.info(`📊 Seguidores confirmados: ${FollowActionUltraHuman.getFollowedCount()}`);
+      Logger.info(`📨 Solicitações enviadas: ${FollowActionUltraHuman.getRequestedCount()}`);
+      Logger.info(`🟢 Seguindo processados: ${FollowActionUltraHuman.getSeguindoProcessedCount()}`);
+      Logger.info(`🟡 Solicitado processados: ${FollowActionUltraHuman.getSolicitadoProcessedCount()}`);
+      Logger.info(`⚠️ Pulados/ignorados: ${FollowActionUltraHuman.getSkippedCount()}`);
+      Logger.success(`Total de ações nesta sessão: ${result}`);
+
+      // Descanso humano dinâmico
+      const restMinutes = Math.floor(Math.random() * 5 + 3); // 3~7 min
+      Logger.info(`😴 Descanso humano dinâmico (${restMinutes} min)`);
+      await HumanDelay.random(restMinutes * 60 * 1000, restMinutes * 60 * 1000 + 2000);
+    }
+
     Logger.info('Picatoc Instagram finalizado com sucesso!');
-
   } catch (err: any) {
     Logger.error(`Erro crítico no Picatoc: ${err?.message || err}`);
   }
