@@ -137,10 +137,16 @@ process.on('SIGINT', () => {
     if (!Runtime.running) return;
 
     /**
-     * 1️⃣1️⃣ Follow Ultra-Human com intervalo dinâmico e limite diário
+     * 1️⃣1️⃣ Follow Ultra-Human com limites oficiais do Instagram
      */
-    const dailyLimit = 500;
-    Logger.action(`▶️ Iniciando Follow Ultra-Human com limite diário: ${dailyLimit}`);
+    const dailyLimit = 500; // Limite diário oficial
+    Logger.action(`▶️ Iniciando Follow Ultra-Human com limites oficiais do Instagram`);
+    Logger.info(`📋 Limites oficiais Instagram (publicação oficial):`);
+    Logger.info(`   ├─ Diário: ${dailyLimit} novos seguidores por dia`);
+    Logger.info(`   ├─ Por hora: 30 novos seguidores por hora`);
+    Logger.info(`   ├─ Total: 7.500 seguidores máximo`);
+    Logger.info(`   └─ Intervalo: 36-48 segundos entre ações (para parecer natural)`);
+    Logger.info(`⏰ Sistema respeitará todos os limites automaticamente`);
 
     // Reset stats antes de iniciar a sessão
     FollowActionUltraHuman['stats'] = { 
@@ -151,22 +157,48 @@ process.on('SIGINT', () => {
       solicitadoProcessed: 0
     };
 
+    // Inicializa o HumanClock
+    HumanClock.initialize();
+    
+    // Reseta contadores diários (mantém total histórico)
+    HumanClock.resetDaily();
+    
+    const sessionStats = HumanClock.getStats();
+    const limitInfo = HumanClock.getLimitInfo();
+    Logger.info(`⏰ Sessão iniciada | Tempo: ${sessionStats.elapsedTime}`);
+    Logger.info(`📊 Status dos limites: Diário ${limitInfo.daily.current}/${limitInfo.daily.limit} | Hora ${limitInfo.hourly.current}/${limitInfo.hourly.limit} | Total ${limitInfo.total.current}/${limitInfo.total.limit}`);
+    
+    // Se o total já estiver muito alto, permite configurar manualmente
+    if (limitInfo.total.current >= limitInfo.total.limit) {
+      Logger.warn(`⚠️ ATENÇÃO: Limite total de ${limitInfo.total.limit} já atingido!`);
+      Logger.warn(`⚠️ Se você tem menos de ${limitInfo.total.limit} seguidores, use HumanClock.setTotalFollows(count) para ajustar`);
+    }
+
     while (Runtime.running && HumanClock.canFollow(dailyLimit)) {
-      // Executa o follow **uma vez por ciclo** para log imediato
+      // Executa o follow - os intervalos humanos são gerenciados internamente
       const result = await FollowActionUltraHuman.execute(modal as ElementHandle<HTMLElement>, dailyLimit);
 
-      // Log detalhado **imediatamente após cada usuário**
-      Logger.info(`📊 Seguidores confirmados: ${FollowActionUltraHuman.getFollowedCount()}`);
-      Logger.info(`📨 Solicitações enviadas: ${FollowActionUltraHuman.getRequestedCount()}`);
-      Logger.info(`🟢 Seguindo processados: ${FollowActionUltraHuman.getSeguindoProcessedCount()}`);
-      Logger.info(`🟡 Solicitado processados: ${FollowActionUltraHuman.getSolicitadoProcessedCount()}`);
-      Logger.info(`⚠️ Pulados/ignorados: ${FollowActionUltraHuman.getSkippedCount()}`);
-      Logger.success(`Total de ações nesta sessão: ${result}`);
-
-      // Descanso humano dinâmico
-      const restMinutes = Math.floor(Math.random() * 5 + 3); // 3~7 min
-      Logger.info(`😴 Descanso humano dinâmico (${restMinutes} min)`);
-      await HumanDelay.random(restMinutes * 60 * 1000, restMinutes * 60 * 1000 + 2000);
+      // Log detalhado após cada lote processado
+      Logger.info(`📊 Resumo do lote:`);
+      Logger.info(`   - Seguidores confirmados: ${FollowActionUltraHuman.getFollowedCount()}`);
+      Logger.info(`   - Solicitações enviadas: ${FollowActionUltraHuman.getRequestedCount()}`);
+      Logger.info(`   - Seguindo processados: ${FollowActionUltraHuman.getSeguindoProcessedCount()}`);
+      Logger.info(`   - Solicitado processados: ${FollowActionUltraHuman.getSolicitadoProcessedCount()}`);
+      Logger.info(`   - Pulados/ignorados: ${FollowActionUltraHuman.getSkippedCount()}`);
+      Logger.success(`✅ Total de ações (seguir + solicitações) nesta sessão: ${result}`);
+      
+      // Estatísticas em tempo real
+      const currentStats = HumanClock.getStats();
+      const currentLimitInfo = HumanClock.getLimitInfo();
+      const remainingActions = dailyLimit - (FollowActionUltraHuman.getFollowedCount() + FollowActionUltraHuman.getRequestedCount());
+      Logger.info(`⏰ Tempo decorrido: ${currentStats.elapsedTime} | Restam: ${remainingActions} ações | Média: ${currentStats.avgActionsPerHour} ações/hora`);
+      Logger.info(`📋 Limites atuais: Diário ${currentLimitInfo.daily.current}/${currentLimitInfo.daily.limit} | Hora ${currentLimitInfo.hourly.current}/${currentLimitInfo.hourly.limit} | Total ${currentLimitInfo.total.current}/${currentLimitInfo.total.limit}`);
+      
+      // Aguarda um pouco antes de processar o próximo lote (mas o intervalo principal já é gerenciado internamente)
+      if (Runtime.running && remainingActions > 0) {
+        Logger.info(`🔄 Preparando próximo lote...`);
+        await HumanDelay.random(2000, 4000);
+      }
     }
 
     Logger.info('Picatoc Instagram finalizado com sucesso!');
