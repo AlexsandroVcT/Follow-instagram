@@ -159,7 +159,7 @@ process.on('SIGINT', () => {
     /**
      * 1️⃣1️⃣ Follow Ultra-Human
      */
-    const dailyLimit = 50;
+    const dailyLimit = 500;
 
     const totalFollowed = await FollowActionUltraHuman.execute(
       modal as ElementHandle<HTMLElement>,

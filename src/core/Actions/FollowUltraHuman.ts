@@ -20,14 +20,22 @@ export class FollowActionUltraHuman {
 
   static async execute(
     container: Container,
-    dailyLimit = 150
+    dailyLimit = 500
   ): Promise<number> {
     Logger.action(`▶️ Follow Ultra-Human iniciado (máx ${dailyLimit}/dia)`);
 
     const page = await this.resolvePage(container);
 
     while (HumanClock.canFollow(dailyLimit) && Runtime.running) {
-      const buttons = await container.$$('button');
+      let buttons: ElementHandle<HTMLElement>[] = [];
+      try {
+        buttons = await container.$$('button');
+      } catch {
+        Logger.warn('Falha ao coletar botões no container, tentando novamente...');
+        await HumanDelay.random(1000, 2000);
+        continue;
+      }
+
       const followButtons: ElementHandle<HTMLElement>[] = [];
 
       for (const button of buttons) {
@@ -51,9 +59,7 @@ export class FollowActionUltraHuman {
         if (!HumanClock.canFollow(dailyLimit) || !Runtime.running) break;
 
         try {
-          const before = await button.evaluate(el =>
-            el.innerText?.toLowerCase()
-          );
+          const before = await button.evaluate(el => el.innerText?.toLowerCase());
 
           if (!before || before.includes('seguindo') || before.includes('solicit')) {
             this.stats.skipped++;
@@ -87,8 +93,8 @@ export class FollowActionUltraHuman {
           // ⏳ tempo real de reação do Instagram
           await HumanDelay.random(1800, 3200);
 
-          // ✅ CONFIRMAÇÃO FLEXÍVEL
-          const confirmed = await this.confirmFollow(container);
+          // ✅ CONFIRMAÇÃO FLEXÍVEL COM RETRY
+          const confirmed = await this.confirmFollow(container, 3);
 
           this.stats.followed++;
           HumanClock.registerFollow();
@@ -105,6 +111,7 @@ export class FollowActionUltraHuman {
 
           await HumanDelay.random(3500, 7500);
 
+          // Descanso humano periódico
           if (this.stats.followed % this.randomBetween(8, 14) === 0) {
             const rest = this.randomBetween(3, 7) * 60 * 1000;
             Logger.info(`😴 Descanso humano (${rest / 60000} min)`);
@@ -132,36 +139,27 @@ export class FollowActionUltraHuman {
 
   // 🧠 Resolve Page REAL sem cast perigoso
   private static async resolvePage(container: Container): Promise<Page> {
-    if ('mouse' in container) {
-      return container as Page;
-    }
+    if ('mouse' in container) return container as Page;
 
     const element = container as ElementHandle<HTMLElement>;
     const frame = await element.ownerFrame();
     const page = frame?.page();
-    if (!page) {
-      throw new Error('Não foi possível resolver a Page do container');
-    }
-
+    if (!page) throw new Error('Não foi possível resolver a Page do container');
     return page;
   }
 
-  // 🔍 Confirmação tolerante (Instagram é assíncrono)
-  private static async confirmFollow(container: Container): Promise<boolean> {
-    try {
-      const buttons = await container.$$('button');
-
-      for (const btn of buttons) {
-        const text = await btn.evaluate(el =>
-          el.innerText?.toLowerCase()
-        );
-
-        if (text?.includes('seguindo') || text?.includes('solicit')) {
-          return true;
+  // 🔍 Confirmação tolerante (retry opcional)
+  private static async confirmFollow(container: Container, retries = 3): Promise<boolean> {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const buttons = await container.$$('button');
+        for (const btn of buttons) {
+          const text = await btn.evaluate(el => el.innerText?.toLowerCase());
+          if (text?.includes('seguindo') || text?.includes('solicit')) return true;
         }
-      }
-    } catch {}
-
+      } catch {}
+      await HumanDelay.random(500, 1200); // espera antes da próxima tentativa
+    }
     return false;
   }
 
