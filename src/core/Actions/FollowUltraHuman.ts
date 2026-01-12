@@ -386,9 +386,14 @@ export class FollowActionUltraHuman {
           // Log resumo após cada ação
           const stats = HumanClock.getStats();
           const limitInfo = HumanClock.getLimitInfo();
-          Logger.info(`📊 [${i + 1}/${visibleButtons.length}] Resumo: Seguidos: ${this.stats.followed} | Solicitações: ${this.stats.requested} | Seguindo: ${this.stats.seguindoProcessed} | Solicitado: ${this.stats.solicitadoProcessed} | Pulados: ${this.stats.skipped}`);
-          Logger.info(`⏰ Tempo: ${stats.elapsedTime} | Média: ${stats.avgActionsPerHour} ações/hora`);
-          Logger.info(`📋 Limites: Diário ${limitInfo.daily.current}/${limitInfo.daily.limit} | Hora ${limitInfo.hourly.current}/${limitInfo.hourly.limit} | Total ${limitInfo.total.current}/${limitInfo.total.limit}`);
+          Logger.info(`📊 [${i + 1}/${visibleButtons.length}] Resumo:`);
+          Logger.info(`   ├─ Follows confirmados: ${this.stats.followed} (contam para limites)`);
+          Logger.info(`   ├─ Solicitações: ${this.stats.requested} (NÃO contam para limites)`);
+          Logger.info(`   ├─ Seguindo processados: ${this.stats.seguindoProcessed} (estado passivo)`);
+          Logger.info(`   ├─ Solicitado processados: ${this.stats.solicitadoProcessed} (estado passivo)`);
+          Logger.info(`   └─ Pulados: ${this.stats.skipped}`);
+          Logger.info(`⏰ Tempo: ${stats.elapsedTime} | Média: ${stats.avgActionsPerHour} follows/hora (janela móvel - apenas confirmados)`);
+          Logger.info(`📋 Limites: Diário ${limitInfo.daily.current}/${limitInfo.daily.limit} follows | Hora ${limitInfo.hourly.current}/${limitInfo.hourly.limit} follows | Total ${limitInfo.total.current}/${limitInfo.total.limit}`);
 
           // Intervalo oficial do Instagram (36-48 segundos) apenas para "Seguir"
           if (status === 'seguir' && (this.stats.followed > 0 || this.stats.requested > 0)) {
@@ -424,12 +429,15 @@ export class FollowActionUltraHuman {
             }
           }
 
-          // Verifica pausas
-          const seguirActions = this.stats.followed + this.stats.requested;
-          if (seguirActions > 0 && HumanClock.needsLongBreak()) {
+          // Verifica pausas (apenas para follows confirmados, não solicitações)
+          // ⚠️ IMPORTANTE: Usa apenas follows confirmados para pausas
+          if (this.stats.followed > 0 && HumanClock.needsLongBreak()) {
             await HumanClock.takeLongBreak();
-          } else if (seguirActions > 0 && HumanClock.needsShortBreak()) {
+          } else if (this.stats.followed > 0 && HumanClock.needsShortBreak()) {
             await HumanClock.takeShortBreak();
+          } else if (this.stats.followed > 0 && HumanClock.needsNaturalBreak()) {
+            // Pausa natural humana (2-5 minutos) após 10-15 follows
+            await HumanClock.takeNaturalBreak();
           }
 
         } catch (err: any) {
@@ -448,12 +456,18 @@ export class FollowActionUltraHuman {
 
     // Se saiu do loop por limite ou Runtime.running = false
     const finalStats = HumanClock.getStats();
-    const actionCount = this.stats.followed + this.stats.requested;
+    // ✅ actionCount usa APENAS follows confirmados (não solicitações)
+    const actionCount = this.stats.followed;
     
     Logger.success(
-      `🎯 Processamento do modal finalizado | Seguidos: ${this.stats.followed} | Solicitações: ${this.stats.requested} | Seguindo processados: ${this.stats.seguindoProcessed} | Solicitado processados: ${this.stats.solicitadoProcessed} | Pulados: ${this.stats.skipped}`
+      `🎯 Processamento do modal finalizado`
     );
-    Logger.info(`⏰ Tempo total: ${finalStats.elapsedTime} | Média: ${finalStats.avgActionsPerHour} ações/hora | Total hoje: ${finalStats.followsToday}/${dailyLimit}`);
+    Logger.info(`   ├─ Follows confirmados: ${this.stats.followed} (contam para limites)`);
+    Logger.info(`   ├─ Solicitações: ${this.stats.requested} (NÃO contam para limites)`);
+    Logger.info(`   ├─ Seguindo processados: ${this.stats.seguindoProcessed} (estado passivo)`);
+    Logger.info(`   ├─ Solicitado processados: ${this.stats.solicitadoProcessed} (estado passivo)`);
+    Logger.info(`   └─ Pulados: ${this.stats.skipped}`);
+    Logger.info(`⏰ Tempo total: ${finalStats.elapsedTime} | Média: ${finalStats.avgActionsPerHour} follows/hora (janela móvel) | Total hoje: ${finalStats.followsToday}/${dailyLimit} follows confirmados`);
 
     return { actionCount, modalExhausted: false };
   }
@@ -581,15 +595,16 @@ export class FollowActionUltraHuman {
     const finalResult = result || await this.confirmFollow(container);
 
     if (finalResult === 'followed') {
+      // ✅ FOLLOW CONFIRMADO: Conta para limites horários/diários
       this.stats.followed++;
       HumanClock.registerFollow();
       Logger.success(`✅ Follow confirmado (${this.stats.followed}/${dailyLimit})`);
     } else if (finalResult === 'requested') {
-      // Quando um "Seguir" vira "Solicitado" (perfil privado), conta tanto em requested quanto em solicitadoProcessed
+      // 📩 SOLICITAÇÃO: NÃO conta para limites, apenas para estatísticas
       this.stats.requested++;
-      this.stats.solicitadoProcessed++; // Incrementa também o contador de solicitado processados
-      HumanClock.registerFollow();
-      Logger.success(`📩 Solicitação enviada (Perfil privado detectado!) (${this.stats.requested}/${dailyLimit})`);
+      this.stats.solicitadoProcessed++;
+      HumanClock.registerRequest(); // ⚠️ NÃO usa registerFollow() - não conta para limites
+      Logger.success(`📩 Solicitação enviada (Perfil privado) - NÃO conta para limites (${this.stats.requested} solicitações, ${this.stats.followed} follows confirmados)`);
       Logger.info(`🟡 Total de perfis "Solicitado" processados: ${this.stats.solicitadoProcessed}`);
     } else {
       // Tenta verificar novamente após mais um delay (tenta botão específico primeiro)
@@ -597,15 +612,16 @@ export class FollowActionUltraHuman {
       const retryResult = await this.confirmFollowForButton(button, container) || await this.confirmFollow(container);
       
       if (retryResult === 'followed') {
+        // ✅ FOLLOW CONFIRMADO: Conta para limites
         this.stats.followed++;
         HumanClock.registerFollow();
         Logger.success(`✅ Follow confirmado na retry (${this.stats.followed}/${dailyLimit})`);
       } else if (retryResult === 'requested') {
-        // Quando um "Seguir" vira "Solicitado" (perfil privado), conta tanto em requested quanto em solicitadoProcessed
+        // 📩 SOLICITAÇÃO: NÃO conta para limites
         this.stats.requested++;
-        this.stats.solicitadoProcessed++; // Incrementa também o contador de solicitado processados
-        HumanClock.registerFollow();
-        Logger.success(`📩 Solicitação enviada na retry (Perfil privado detectado!) (${this.stats.requested}/${dailyLimit})`);
+        this.stats.solicitadoProcessed++;
+        HumanClock.registerRequest(); // ⚠️ NÃO usa registerFollow() - não conta para limites
+        Logger.success(`📩 Solicitação enviada na retry (Perfil privado) - NÃO conta para limites (${this.stats.requested} solicitações, ${this.stats.followed} follows confirmados)`);
         Logger.info(`🟡 Total de perfis "Solicitado" processados: ${this.stats.solicitadoProcessed}`);
       } else {
         this.stats.skipped++;

@@ -296,26 +296,29 @@ process.on('SIGINT', () => {
         }
         const result = await FollowActionUltraHuman.execute(modal, dailyLimit);
         
+        // ✅ actionCount agora retorna APENAS follows confirmados (não solicitações)
         profileActions += result.actionCount;
         totalActionsAcrossProfiles += result.actionCount;
         modalExhausted = result.modalExhausted;
 
         // Log detalhado após cada lote processado
         Logger.info(`📊 Resumo do lote para @${currentProfile}:`);
-        Logger.info(`   - Seguidores confirmados: ${FollowActionUltraHuman.getFollowedCount()}`);
-        Logger.info(`   - Solicitações enviadas: ${FollowActionUltraHuman.getRequestedCount()}`);
-        Logger.info(`   - Seguindo processados: ${FollowActionUltraHuman.getSeguindoProcessedCount()}`);
-        Logger.info(`   - Solicitado processados: ${FollowActionUltraHuman.getSolicitadoProcessedCount()}`);
-        Logger.info(`   - Pulados/ignorados: ${FollowActionUltraHuman.getSkippedCount()}`);
-        Logger.info(`   - Ações neste perfil: ${profileActions}`);
-        Logger.info(`   - Total de ações na sessão: ${totalActionsAcrossProfiles}`);
+        Logger.info(`   ├─ Follows confirmados: ${FollowActionUltraHuman.getFollowedCount()} (contam para limites)`);
+        Logger.info(`   ├─ Solicitações: ${FollowActionUltraHuman.getRequestedCount()} (NÃO contam para limites)`);
+        Logger.info(`   ├─ Seguindo processados: ${FollowActionUltraHuman.getSeguindoProcessedCount()} (estado passivo)`);
+        Logger.info(`   ├─ Solicitado processados: ${FollowActionUltraHuman.getSolicitadoProcessedCount()} (estado passivo)`);
+        Logger.info(`   ├─ Pulados/ignorados: ${FollowActionUltraHuman.getSkippedCount()}`);
+        Logger.info(`   ├─ Follows neste perfil: ${profileActions} (apenas confirmados)`);
+        Logger.info(`   └─ Total de follows na sessão: ${totalActionsAcrossProfiles} (apenas confirmados)`);
         
         // Estatísticas em tempo real
         const currentStats = HumanClock.getStats();
         const currentLimitInfo = HumanClock.getLimitInfo();
-        const remainingActions = dailyLimit - (FollowActionUltraHuman.getFollowedCount() + FollowActionUltraHuman.getRequestedCount());
-        Logger.info(`⏰ Tempo decorrido: ${currentStats.elapsedTime} | Restam: ${remainingActions} ações | Média: ${currentStats.avgActionsPerHour} ações/hora`);
-        Logger.info(`📋 Limites atuais: Diário ${currentLimitInfo.daily.current}/${currentLimitInfo.daily.limit} | Hora ${currentLimitInfo.hourly.current}/${currentLimitInfo.hourly.limit} | Total ${currentLimitInfo.total.current}/${currentLimitInfo.total.limit}`);
+        // ✅ IMPORTANTE: Limite diário usa APENAS follows confirmados, não solicitações
+        const remainingActions = dailyLimit - FollowActionUltraHuman.getFollowedCount();
+        Logger.info(`⏰ Tempo decorrido: ${currentStats.elapsedTime} | Restam: ${remainingActions} follows | Média: ${currentStats.avgActionsPerHour} follows/hora (janela móvel)`);
+        Logger.info(`📋 Limites: Diário ${currentLimitInfo.daily.current}/${currentLimitInfo.daily.limit} follows | Hora ${currentLimitInfo.hourly.current}/${currentLimitInfo.hourly.limit} follows | Total ${currentLimitInfo.total.current}/${currentLimitInfo.total.limit}`);
+        Logger.info(`📊 Estatísticas: ${FollowActionUltraHuman.getFollowedCount()} follows confirmados | ${FollowActionUltraHuman.getRequestedCount()} solicitações (não contam para limites)`);
         
         if (modalExhausted) {
           Logger.info(`🔄 Modal de @${currentProfile} esgotado. Fechando e trocando de perfil...`);
@@ -359,9 +362,11 @@ process.on('SIGINT', () => {
     Logger.info(`\n${'='.repeat(60)}`);
     Logger.info(`🎯 Processamento de perfis finalizado!`);
     Logger.info(`   ├─ Perfis processados: ${profileIndex}/${profileQueue.length}`);
-    Logger.info(`   ├─ Total de ações: ${totalActionsAcrossProfiles}`);
-    Logger.info(`   ├─ Seguidos: ${FollowActionUltraHuman.getFollowedCount()}`);
-    Logger.info(`   └─ Solicitações: ${FollowActionUltraHuman.getRequestedCount()}`);
+    Logger.info(`   ├─ Follows confirmados: ${FollowActionUltraHuman.getFollowedCount()} (contam para limites)`);
+    Logger.info(`   ├─ Solicitações: ${FollowActionUltraHuman.getRequestedCount()} (NÃO contam para limites)`);
+    Logger.info(`   ├─ Total de follows na sessão: ${totalActionsAcrossProfiles} (apenas confirmados)`);
+    Logger.info(`   ├─ Seguindo processados: ${FollowActionUltraHuman.getSeguindoProcessedCount()} (estado passivo)`);
+    Logger.info(`   └─ Solicitado processados: ${FollowActionUltraHuman.getSolicitadoProcessedCount()} (estado passivo)`);
     Logger.info(`${'='.repeat(60)}\n`);
 
     Logger.info('Picatoc Instagram finalizado com sucesso!');

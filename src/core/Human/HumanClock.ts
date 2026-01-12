@@ -209,17 +209,49 @@ export class HumanClock {
   }
 
   /**
-   * Verifica se precisa de pausa curta (a cada 15 ações)
+   * Verifica se precisa de pausa curta (a cada 30 follows confirmados)
+   * ⚠️ Usa apenas follows confirmados, não solicitações
    */
   static needsShortBreak(): boolean {
     return this.followsToday > 0 && this.followsToday % this.SHORT_BREAK_INTERVAL === 0;
   }
 
   /**
-   * Verifica se precisa de pausa longa (a cada 50 ações)
+   * Verifica se precisa de pausa longa (a cada 300 follows confirmados)
+   * ⚠️ Usa apenas follows confirmados, não solicitações
    */
   static needsLongBreak(): boolean {
     return this.followsToday > 0 && this.followsToday % this.LONG_BREAK_INTERVAL === 0;
+  }
+
+  /**
+   * Verifica se precisa de pausa humana natural (após 10-15 follows)
+   * Pausas curtas e silenciosas para parecer mais humano
+   */
+  static needsNaturalBreak(): boolean {
+    // Pausa após 10-15 follows (aleatório para parecer natural)
+    if (this.followsToday === 0) return false;
+    
+    // Gera pausa aleatória entre 10-15 follows
+    const breakInterval = 10 + Math.floor(Math.random() * 6); // 10-15
+    return this.followsToday % breakInterval === 0;
+  }
+
+  /**
+   * Pausa natural humana (2-5 minutos)
+   * Pausas silenciosas que simulam comportamento humano real
+   */
+  static async takeNaturalBreak(): Promise<void> {
+    const breakMinutes = 2 + Math.floor(Math.random() * 4); // 2-5 minutos
+    const msPerMinute = this.SECONDS_PER_MINUTE * this.MS_PER_SECOND;
+    const breakMs = breakMinutes * msPerMinute;
+    
+    Logger.info(`⏸️ Pausa natural: ${breakMinutes} minutos (comportamento humano)`);
+    
+    // Aguarda silenciosamente (sem spam de logs)
+    await new Promise(resolve => setTimeout(resolve, breakMs));
+    
+    Logger.success(`✅ Retomando após pausa natural...`);
   }
 
   /**
@@ -292,6 +324,11 @@ export class HumanClock {
     Logger.success('✅ Pausa longa finalizada. Retomando...');
   }
 
+  /**
+   * ✅ Registra um FOLLOW CONFIRMADO (mudança real de estado)
+   * Esta é a ÚNICA função que deve ser chamada para follows reais
+   * Ela atualiza limites horários, diários e totais
+   */
   static registerFollow() {
     const now = Date.now();
     this.followsToday++;
@@ -307,8 +344,29 @@ export class HumanClock {
     Logger.info(`📊 Limites: Diário ${limitInfo.daily.current}/${limitInfo.daily.limit} | Hora ${limitInfo.hourly.current}/${limitInfo.hourly.limit} | Total ${limitInfo.total.current}/${limitInfo.total.limit}`);
   }
 
+  /**
+   * 📩 Registra uma SOLICITAÇÃO (perfil privado)
+   * ⚠️ IMPORTANTE: Solicitações NÃO contam para limites horários/diários
+   * Elas são apenas rastreadas para estatísticas, mas não afetam limites
+   */
+  private static requestsToday = 0;
+  
+  static registerRequest() {
+    this.requestsToday++;
+    // ⚠️ NÃO incrementa followsToday
+    // ⚠️ NÃO incrementa followsThisHour
+    // ⚠️ NÃO incrementa totalFollowsEver
+    // Solicitações são apenas para estatísticas, não para limites
+    Logger.info(`📩 Solicitação registrada (não conta para limites): ${this.requestsToday} total`);
+  }
+
+  static getRequestCount(): number {
+    return this.requestsToday;
+  }
+
   static resetDaily() {
     this.followsToday = 0;
+    this.requestsToday = 0;
     this.lastFollowTime = 0;
     this.followsThisHour = [];
     // NÃO resetamos sessionStartTime e totalFollowsEver para manter histórico
@@ -322,17 +380,38 @@ export class HumanClock {
     Logger.info(`📊 Total de seguidores configurado: ${this.totalFollowsEver}/${this.TOTAL_LIMIT}`);
   }
 
+  /**
+   * Calcula média horária usando janela móvel (rolling window)
+   * Considera apenas follows confirmados da última hora
+   */
+  private static calculateRollingAverage(): string {
+    this.cleanupOldHourlyData();
+    
+    // Usa apenas follows confirmados da última hora (não solicitações)
+    const followsInLastHour = this.followsThisHour.length;
+    
+    // Se não há follows na última hora, retorna 0
+    if (followsInLastHour === 0) {
+      return '0.00';
+    }
+    
+    // Calcula média baseada em follows reais da última hora
+    // A janela móvel já está implementada via cleanupOldHourlyData()
+    return followsInLastHour.toFixed(2);
+  }
+
   static getStats() {
     const elapsed = this.sessionStartTime > 0 ? Date.now() - this.sessionStartTime : 0;
     const msPerHour = this.MINUTES_PER_HOUR * this.SECONDS_PER_MINUTE * this.MS_PER_SECOND;
     const elapsedHours = Math.floor(elapsed / msPerHour);
     const elapsedMinutes = Math.floor((elapsed % msPerHour) / (this.SECONDS_PER_MINUTE * this.MS_PER_SECOND));
     
-    const hoursElapsed = elapsed / msPerHour;
-    const avgActionsPerHour = elapsed > 0 ? (this.followsToday / hoursElapsed).toFixed(2) : '0';
+    // ✅ Média horária usando janela móvel (apenas follows confirmados da última hora)
+    const avgActionsPerHour = this.calculateRollingAverage();
     
     return {
       followsToday: this.followsToday,
+      requestsToday: this.requestsToday,
       lastFollowTime: this.lastFollowTime,
       sessionStartTime: this.sessionStartTime,
       elapsedTime: `${elapsedHours}h ${elapsedMinutes}min`,
