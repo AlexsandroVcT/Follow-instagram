@@ -233,11 +233,32 @@ process.on('SIGINT', () => {
 
     /**
      * 8️⃣ Loop principal: processa cada perfil da fila
+     * 🔁 Este loop NUNCA finaliza por limite horário - apenas pausa e retoma
      */
     let profileIndex = 0;
     let totalActionsAcrossProfiles = 0;
 
-    while (Runtime.running && HumanClock.canFollow(dailyLimit) && profileIndex < profileQueue.length) {
+    while (Runtime.running && profileIndex < profileQueue.length) {
+      // ✅ Verifica limites e aguarda cooldown se necessário
+      const limitCheck = HumanClock.canFollowCheck(dailyLimit);
+      
+      if (!limitCheck.canFollow) {
+        if (limitCheck.reason === 'hourly') {
+          // ⏸️ Limite horário: PAUSA e aguarda cooldown, depois CONTINUA
+          await HumanClock.waitForHourlyCooldown();
+          // Após cooldown, continua o loop (não finaliza)
+          continue;
+        } else if (limitCheck.reason === 'daily') {
+          // ❌ Limite diário: FINALIZA execução
+          Logger.warn(`⚠️ Limite diário atingido. Finalizando execução.`);
+          break;
+        } else if (limitCheck.reason === 'total') {
+          // ❌ Limite total: FINALIZA execução
+          Logger.error(`❌ Limite total atingido. Finalizando execução.`);
+          break;
+        }
+      }
+
       const currentProfile = profileQueue[profileIndex];
       Logger.info(`\n${'='.repeat(60)}`);
       Logger.info(`📊 Processando perfil ${profileIndex + 1}/${profileQueue.length}: @${currentProfile}`);
@@ -257,7 +278,22 @@ process.on('SIGINT', () => {
       let profileActions = 0;
       let modalExhausted = false;
 
-      while (Runtime.running && HumanClock.canFollow(dailyLimit) && !modalExhausted) {
+      while (Runtime.running && !modalExhausted) {
+        // ✅ Verifica limites antes de processar
+        const innerLimitCheck = HumanClock.canFollowCheck(dailyLimit);
+        
+        if (!innerLimitCheck.canFollow) {
+          if (innerLimitCheck.reason === 'hourly') {
+            // ⏸️ Limite horário: PAUSA e aguarda cooldown
+            await HumanClock.waitForHourlyCooldown();
+            // Após cooldown, continua processando o mesmo modal
+            continue;
+          } else if (innerLimitCheck.reason === 'daily' || innerLimitCheck.reason === 'total') {
+            // ❌ Limite diário/total: Finaliza processamento deste modal e sai do loop interno
+            Logger.warn(`⚠️ Limite ${innerLimitCheck.reason} atingido durante processamento. Finalizando perfil atual.`);
+            break;
+          }
+        }
         const result = await FollowActionUltraHuman.execute(modal, dailyLimit);
         
         profileActions += result.actionCount;
@@ -283,7 +319,23 @@ process.on('SIGINT', () => {
         
         if (modalExhausted) {
           Logger.info(`🔄 Modal de @${currentProfile} esgotado. Fechando e trocando de perfil...`);
-        } else if (Runtime.running && remainingActions > 0) {
+          break; // Sai do loop interno para trocar de perfil
+        }
+        
+        // Verifica novamente limites após processar lote (pode ter atingido durante processamento)
+        const postLimitCheck = HumanClock.canFollowCheck(dailyLimit);
+        if (!postLimitCheck.canFollow && postLimitCheck.reason === 'hourly') {
+          // ⏸️ Limite horário atingido durante processamento: PAUSA e aguarda
+          await HumanClock.waitForHourlyCooldown();
+          // Após cooldown, continua processando o mesmo modal
+          continue;
+        } else if (!postLimitCheck.canFollow && (postLimitCheck.reason === 'daily' || postLimitCheck.reason === 'total')) {
+          // ❌ Limite diário/total atingido: Finaliza perfil atual
+          Logger.warn(`⚠️ Limite ${postLimitCheck.reason} atingido. Finalizando perfil atual.`);
+          break;
+        }
+        
+        if (Runtime.running) {
           Logger.info(`🔄 Preparando próximo lote...`);
           await HumanDelay.random(2000, 4000);
         }
@@ -298,8 +350,8 @@ process.on('SIGINT', () => {
       
       profileIndex++;
       
-      // Se ainda há perfis na fila e não atingiu o limite, continua
-      if (profileIndex < profileQueue.length && Runtime.running && HumanClock.canFollow(dailyLimit)) {
+      // Se ainda há perfis na fila, continua (independente de limites - eles serão tratados no início do loop)
+      if (profileIndex < profileQueue.length && Runtime.running) {
         Logger.info(`\n🔄 Troca de contexto: Próximo perfil será @${profileQueue[profileIndex]}\n`);
       }
     }

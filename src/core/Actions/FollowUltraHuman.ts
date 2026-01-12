@@ -250,7 +250,30 @@ export class FollowActionUltraHuman {
     }
 
     // 🔁 LOOP PRINCIPAL: Processa ciclos até modal esgotado ou limite atingido
-    while (HumanClock.canFollow(dailyLimit) && Runtime.running) {
+    // ⚠️ Este loop NUNCA finaliza por limite horário - apenas pausa e retoma
+    while (Runtime.running) {
+      // ✅ Verifica limites e aguarda cooldown se necessário
+      const limitCheck = HumanClock.canFollowCheck(dailyLimit);
+      
+      if (!limitCheck.canFollow) {
+        if (limitCheck.reason === 'hourly') {
+          // ⏸️ Limite horário: PAUSA e aguarda cooldown, depois CONTINUA
+          await HumanClock.waitForHourlyCooldown();
+          // Após cooldown, continua o loop (não finaliza)
+          continue;
+        } else if (limitCheck.reason === 'daily') {
+          // ❌ Limite diário: FINALIZA processamento deste modal
+          Logger.warn(`⚠️ Limite diário atingido durante processamento do modal.`);
+          const actionCount = this.stats.followed + this.stats.requested;
+          return { actionCount, modalExhausted: false };
+        } else if (limitCheck.reason === 'total') {
+          // ❌ Limite total: FINALIZA processamento deste modal
+          Logger.error(`❌ Limite total atingido durante processamento do modal.`);
+          const actionCount = this.stats.followed + this.stats.requested;
+          return { actionCount, modalExhausted: false };
+        }
+      }
+
       await HumanDelay.random(500, 1000);
       
       // 🔄 CAPTURA DINÂMICA: Busca apenas botões visíveis e não processados
@@ -300,10 +323,22 @@ export class FollowActionUltraHuman {
         actionsProcessedThisModal++;
 
         // Verifica se pode continuar (apenas para "Seguir" o limite importa)
-        if (status === 'seguir' && !HumanClock.canFollow(dailyLimit)) {
-          Logger.warn(`⚠️ Limite diário atingido. Parando processamento.`);
-          const actionCount = this.stats.followed + this.stats.requested;
-          return { actionCount, modalExhausted: false };
+        if (status === 'seguir') {
+          const limitCheck = HumanClock.canFollowCheck(dailyLimit);
+          
+          if (!limitCheck.canFollow) {
+            if (limitCheck.reason === 'hourly') {
+              // ⏸️ Limite horário: PAUSA e aguarda cooldown
+              await HumanClock.waitForHourlyCooldown();
+              // Após cooldown, continua processando (não finaliza)
+              continue;
+            } else if (limitCheck.reason === 'daily' || limitCheck.reason === 'total') {
+              // ❌ Limite diário/total: FINALIZA processamento
+              Logger.warn(`⚠️ Limite ${limitCheck.reason} atingido. Parando processamento.`);
+              const actionCount = this.stats.followed + this.stats.requested;
+              return { actionCount, modalExhausted: false };
+            }
+          }
         }
 
         if (!Runtime.running) {

@@ -52,8 +52,9 @@ export class HumanClock {
 
   /**
    * Verifica se pode seguir (respeitando todos os limites)
+   * Retorna: { canFollow: boolean, reason?: 'daily' | 'hourly' | 'total' }
    */
-  static canFollow(dailyLimit?: number): boolean {
+  static canFollowCheck(dailyLimit?: number): { canFollow: boolean; reason?: 'daily' | 'hourly' | 'total' } {
     // Limpe dados antigos primeiro
     this.cleanupOldHourlyData();
     
@@ -61,8 +62,7 @@ export class HumanClock {
     
     // Verifica limite diário
     if (this.followsToday >= limit) {
-      Logger.warn(`⚠️ Limite diário atingido: ${this.followsToday}/${limit}`);
-      return false;
+      return { canFollow: false, reason: 'daily' };
     }
     
     // Verifica limite por hora
@@ -74,9 +74,7 @@ export class HumanClock {
         const waitMs = waitUntil - Date.now();
         
         if (waitMs > 0) {
-          const waitMinutes = Math.ceil(waitMs / (this.SECONDS_PER_MINUTE * this.MS_PER_SECOND));
-          Logger.warn(`⚠️ Limite por hora atingido: ${this.followsThisHour.length}/${this.HOURLY_LIMIT} | Aguarde ${waitMinutes} minutos`);
-          return false;
+          return { canFollow: false, reason: 'hourly' };
         }
       } else {
         // Se o array está vazio mas passou na verificação de length, algo está errado - reseta
@@ -86,12 +84,70 @@ export class HumanClock {
     
     // Verifica limite total (7.500) - mas só bloqueia se realmente atingiu o limite
     if (this.totalFollowsEver >= this.TOTAL_LIMIT) {
-      Logger.error(`❌ Limite total atingido: ${this.totalFollowsEver}/${this.TOTAL_LIMIT} seguidores. Não é possível seguir mais ninguém.`);
-      Logger.info(`💡 Use HumanClock.setTotalFollows(count) para ajustar o total atual se necessário`);
-      return false;
+      return { canFollow: false, reason: 'total' };
     }
     
-    return true;
+    return { canFollow: true };
+  }
+
+  /**
+   * Verifica se pode seguir (compatibilidade - retorna boolean)
+   * ⚠️ DEPRECATED: Use canFollowCheck() para obter o motivo da limitação
+   */
+  static canFollow(dailyLimit?: number): boolean {
+    const check = this.canFollowCheck(dailyLimit);
+    return check.canFollow;
+  }
+
+  /**
+   * Aguarda o cooldown horário quando necessário
+   * Retorna true se aguardou, false se não era necessário
+   * ⏸️ Esta função PAUSA a execução, mas NÃO finaliza o processo
+   */
+  static async waitForHourlyCooldown(): Promise<boolean> {
+    this.cleanupOldHourlyData();
+    
+    if (this.followsThisHour.length >= this.HOURLY_LIMIT && this.followsThisHour.length > 0) {
+      const oldestAction = Math.min(...this.followsThisHour);
+      const waitUntil = oldestAction + (this.MINUTES_PER_HOUR * this.SECONDS_PER_MINUTE * this.MS_PER_SECOND);
+      const waitMs = waitUntil - Date.now();
+      
+      if (waitMs > 0) {
+        const waitSeconds = Math.ceil(waitMs / this.MS_PER_SECOND);
+        const waitMinutes = Math.floor(waitSeconds / this.SECONDS_PER_MINUTE);
+        const remSec = waitSeconds % this.SECONDS_PER_MINUTE;
+        
+        Logger.warn(`⏸️ Limite por hora atingido: ${this.followsThisHour.length}/${this.HOURLY_LIMIT}`);
+        Logger.info(`⏳ Aguardando cooldown horário: ${waitMinutes}min ${remSec}s...`);
+        Logger.info(`🔄 O sistema irá PAUSAR e RETOMAR automaticamente após o cooldown`);
+        
+        // Mostra progresso a cada minuto
+        const progressInterval = this.SECONDS_PER_MINUTE * this.MS_PER_SECOND;
+        const steps = Math.floor(waitMs / progressInterval);
+        
+        for (let i = 1; i <= steps; i++) {
+          await new Promise(resolve => setTimeout(resolve, progressInterval));
+          const remaining = waitMs - (i * progressInterval);
+          const remainingMinutes = Math.floor(remaining / (this.SECONDS_PER_MINUTE * this.MS_PER_SECOND));
+          const remainingSeconds = Math.floor((remaining % (this.SECONDS_PER_MINUTE * this.MS_PER_SECOND)) / this.MS_PER_SECOND);
+          
+          if (remaining > 0) {
+            Logger.info(`⏳ Cooldown horário: ${remainingMinutes}min ${remainingSeconds}s restantes...`);
+          }
+        }
+        
+        const remaining = waitMs % progressInterval;
+        if (remaining > 0) {
+          await new Promise(resolve => setTimeout(resolve, remaining));
+        }
+        
+        this.cleanupOldHourlyData(); // Limpa após esperar
+        Logger.success(`✅ Cooldown horário finalizado. Retomando execução automaticamente...`);
+        return true;
+      }
+    }
+    
+    return false;
   }
   
   /**
