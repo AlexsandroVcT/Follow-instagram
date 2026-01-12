@@ -68,371 +68,39 @@ export class FollowActionUltraHuman {
     const initialStats = HumanClock.getStats();
     Logger.info(`⏰ Estatísticas da sessão: ${initialStats.elapsedTime} decorridos, média: ${initialStats.avgActionsPerHour} ações/hora`);
 
-    // Rastreia quantos botões foram processados na última iteração para detectar quando não há mais conteúdo novo
-    let lastProcessedButtonsCount = 0;
-    let noNewContentAttempts = 0;
-    const MAX_NO_NEW_CONTENT_ATTEMPTS = 3;
+    // 🔒 CONTROLE DE ESTADO ISOLADO POR PERFIL
+    // Rastreia usuários/botões já processados usando identificadores únicos
+    const processedUserIds = new Set<string>();
     
-    // Rastreia botões invisíveis para detectar modal esgotado
-    let consecutiveInvisibleButtonsCount = 0;
-    const MAX_CONSECUTIVE_INVISIBLE_BUTTONS = 15; // Se 15+ botões consecutivos invisíveis, modal está esgotado
-    const MAX_INVISIBLE_BUTTONS_PERCENTAGE = 0.7; // Se 70%+ dos botões são invisíveis, modal está esgotado
+    // Contador de ciclos sem novos botões (critério REAL de modal esgotado)
+    let noNewButtonsCycles = 0;
+    const MAX_NO_NEW_BUTTONS_CYCLES = 3; // 3 ciclos consecutivos sem novos botões = modal esgotado
     
-    // Rastreia botões já processados para evitar reutilização
-    const processedButtonIds = new Set<string>();
+    // Contador de ações processadas neste modal
+    let actionsProcessedThisModal = 0;
 
-    while (HumanClock.canFollow(dailyLimit) && Runtime.running) {
-      // Aguarda um pouco para garantir que a página renderizou
-      await HumanDelay.random(500, 1000);
-      
-      const buttons = await container.$$('button');
-      Logger.info(`🔍 Encontrados ${buttons.length} botões na página`);
-      
-      const actionButtons: Array<{ button: ElementHandle<HTMLElement>; status: ButtonStatus; index: number; buttonId: string }> = [];
-      const allButtonsInfo: Array<{ index: number; text: string; fullText: string; ariaLabel: string; status: ButtonStatus | 'unknown' }> = [];
-      let validButtonsFound = 0;
-      let invisibleButtonsCount = 0;
-      let totalButtonsChecked = 0;
+    /**
+     * 🔍 FUNÇÃO: Captura APENAS botões visíveis e não processados
+     * Esta é a função crítica que evita loops infinitos
+     */
+    async function getVisibleUnprocessedButtons(): Promise<Array<{
+      button: ElementHandle<HTMLElement>;
+      status: ButtonStatus;
+      userId: string;
+    }>> {
+      const result: Array<{
+        button: ElementHandle<HTMLElement>;
+        status: ButtonStatus;
+        userId: string;
+      }> = [];
 
-      // Identifica o status de cada botão (Seguir, Seguindo, ou Solicitado)
-      for (let i = 0; i < buttons.length; i++) {
-        const button = buttons[i];
-        
+      // 🔄 CAPTURA DINÂMICA: Busca botões no DOM atual (não lista estática)
+      const allButtons = await container.$$('button');
+      Logger.info(`🔍 Encontrados ${allButtons.length} botões no DOM`);
+
+      for (const button of allButtons) {
         try {
-          totalButtonsChecked++;
-          
-          // Verifica se o botão está visível
-          const isVisible = await button.evaluate(el => {
-            const rect = el.getBoundingClientRect();
-            return rect.width > 0 && rect.height > 0 && 
-                   window.getComputedStyle(el).display !== 'none' &&
-                   window.getComputedStyle(el).visibility !== 'hidden';
-          }).catch(() => false);
-
-          if (!isVisible) {
-            invisibleButtonsCount++;
-            consecutiveInvisibleButtonsCount++;
-            continue;
-          }
-          
-          // Reset contador de botões invisíveis consecutivos quando encontra um visível
-          consecutiveInvisibleButtonsCount = 0;
-
-          // Scrolla até o botão para garantir que está visível antes de ler
-          await button.scrollIntoViewIfNeeded().catch(() => {});
-          await HumanDelay.random(100, 200);
-
-          // Captura TODAS as informações possíveis do botão
-          const buttonInfo = await button.evaluate(el => {
-            // Texto do botão em múltiplas formas
-            const innerDiv = el.querySelector('div');
-            const divs = el.querySelectorAll('div');
-            
-            // Coleta todo texto possível
-            let allTexts: string[] = [];
-            
-            // Texto direto do botão
-            if (el.textContent) allTexts.push(el.textContent.toLowerCase().trim());
-            if (el.innerText) allTexts.push(el.innerText.toLowerCase().trim());
-            
-            // Texto de todos os divs internos
-            divs.forEach(div => {
-              if (div.textContent) allTexts.push(div.textContent.toLowerCase().trim());
-              if (div.innerText) allTexts.push(div.innerText.toLowerCase().trim());
-            });
-            
-            // Atributos HTML
-            const ariaLabel = el.getAttribute('aria-label')?.toLowerCase().trim() || '';
-            const title = el.getAttribute('title')?.toLowerCase().trim() || '';
-            const type = el.getAttribute('type') || '';
-            const dataTestid = el.getAttribute('data-testid')?.toLowerCase().trim() || '';
-            const role = el.getAttribute('role')?.toLowerCase().trim() || '';
-            
-            // Classes CSS (podem indicar status)
-            const classes = Array.from(el.classList).join(' ').toLowerCase();
-            
-            // Verifica também no elemento pai (pode ter informações sobre perfil privado)
-            const parent = el.parentElement;
-            const parentClasses = parent ? Array.from(parent.classList).join(' ').toLowerCase() : '';
-            const parentText = parent?.textContent?.toLowerCase().trim() || '';
-            const parentAriaLabel = parent?.getAttribute('aria-label')?.toLowerCase().trim() || '';
-            
-            // Verifica elementos próximos que possam indicar perfil privado
-            const siblingBefore = el.previousElementSibling;
-            const siblingAfter = el.nextElementSibling;
-            const siblingBeforeText = siblingBefore?.textContent?.toLowerCase().trim() || '';
-            const siblingAfterText = siblingAfter?.textContent?.toLowerCase().trim() || '';
-            
-            // Junta tudo em uma string completa
-            const fullText = [
-              ...allTexts, 
-              ariaLabel, 
-              title, 
-              classes,
-              parentClasses,
-              parentText,
-              parentAriaLabel,
-              dataTestid,
-              role,
-              siblingBeforeText,
-              siblingAfterText
-            ].filter(Boolean).join(' ');
-            
-            // Retorna objeto com todas as informações
-            return {
-              text: allTexts[0] || '',
-              allTexts: allTexts.filter(Boolean),
-              fullText,
-              ariaLabel,
-              title,
-              classes,
-              parentClasses,
-              type,
-              dataTestid,
-              role,
-              parentText,
-              hasPrivateIndicator: fullText.includes('private') || 
-                                   fullText.includes('privado') ||
-                                   fullText.includes('solicitado') ||
-                                   fullText.includes('requested') ||
-                                   dataTestid.includes('request') ||
-                                   classes.includes('request')
-            };
-          }).catch(() => ({
-            text: '',
-            allTexts: [],
-            fullText: '',
-            ariaLabel: '',
-            title: '',
-            classes: '',
-            parentClasses: '',
-            type: '',
-            dataTestid: '',
-            role: '',
-            parentText: '',
-            hasPrivateIndicator: false
-          }));
-
-          // Armazena informações de todos os botões para debug
-          let detectedStatus: ButtonStatus | 'unknown' = 'unknown';
-          
-          // Log detalhado para debug (apenas primeiros 5 botões para não poluir)
-          if (i < 5) {
-            Logger.info(`🔍 Botão ${i + 1} detalhes: texto="${buttonInfo.text}", aria="${buttonInfo.ariaLabel}", title="${buttonInfo.title}", classes="${buttonInfo.classes}"`);
-          }
-
-          // Ignora botão "fechar" do modal (primeiro botão geralmente)
-          if (buttonInfo.text === 'fechar' || 
-              buttonInfo.ariaLabel.includes('fechar') ||
-              buttonInfo.classes.includes('close') ||
-              buttonInfo.classes.includes('_abl-')) {
-            if (i < 5) Logger.info(`🚫 Botão ${i + 1} ignorado: É o botão "fechar" do modal`);
-            allButtonsInfo.push({
-              index: i + 1,
-              text: buttonInfo.text,
-              fullText: buttonInfo.fullText,
-              ariaLabel: buttonInfo.ariaLabel,
-              status: 'unknown'
-            });
-            continue;
-          }
-
-          if (!buttonInfo.fullText && !buttonInfo.text) {
-            if (i < 5) Logger.warn(`⚠️ Botão ${i + 1} sem texto detectável`);
-            allButtonsInfo.push({
-              index: i + 1,
-              text: buttonInfo.text,
-              fullText: buttonInfo.fullText,
-              ariaLabel: buttonInfo.ariaLabel,
-              status: 'unknown'
-            });
-            continue;
-          }
-
-          let status: ButtonStatus = 'unknown';
-          
-          // Usa o texto completo para verificação
-          const searchText = buttonInfo.fullText || buttonInfo.text;
-          
-          // Ordem de verificação IMPORTANTE: verificar "Seguindo" e "Solicitado" PRIMEIRO
-          // para evitar confundir com "Seguir"
-          
-          // 1. Verifica "Solicitado" primeiro (mais específico)
-          // Pode aparecer como: "solicitado", "requested", "cancelar solicitação", "cancelar pedido", etc.
-          // Também verifica indicadores de perfil privado que podem virar solicitado após clique
-          if (searchText.includes('solicitado') || 
-              searchText.includes('requested') || 
-              searchText.includes('pendente') ||
-              searchText.includes('pending') ||
-              (searchText.includes('cancelar') && (searchText.includes('solicit') || searchText.includes('request') || searchText.includes('pedido'))) ||
-              searchText.includes('cancel request') ||
-              buttonInfo.hasPrivateIndicator ||
-              buttonInfo.dataTestid.includes('request') ||
-              (buttonInfo.classes.includes('request') && !buttonInfo.classes.includes('follow'))) {
-            status = 'solicitado';
-            
-            // Log detalhado se detectou por indicador indireto
-            if (!searchText.includes('solicitado') && !searchText.includes('requested')) {
-              Logger.info(`🔍 Botão ${validButtonsFound + 1} detectado como "Solicitado" por indicadores: data-testid="${buttonInfo.dataTestid}", classes="${buttonInfo.classes}", private="${buttonInfo.hasPrivateIndicator}"`);
-            }
-          }
-          // 2. Verifica "Seguindo" - pode ser "seguindo", "following", "parar de seguir", "unfollow", "deixar de seguir"
-          else if (searchText.includes('seguindo') || 
-                   searchText === 'following' || 
-                   searchText.includes('unfollow') ||
-                   searchText.includes('parar de seguir') ||
-                   searchText.includes('deixar de seguir') ||
-                   searchText.includes('parar de seguir') ||
-                   (searchText.includes('parar') && searchText.includes('seguir'))) {
-            status = 'seguindo';
-          }
-          // 3. Verifica "Seguir" - deve ser exato e não conter as palavras acima
-          else if (searchText === 'seguir' || 
-                   searchText === 'follow' ||
-                   (searchText.includes('seguir') && !searchText.includes('seguindo') && !searchText.includes('solicit'))) {
-            // Verifica que não é "seguindo" ou "solicitado" disfarçado
-            if (!searchText.includes('seguindo') && !searchText.includes('solicitado') && !searchText.includes('requested')) {
-              status = 'seguir';
-            }
-          }
-
-          detectedStatus = status;
-
-          if (status !== 'unknown') {
-            // Gera um ID único para o botão baseado em sua posição e texto
-            const buttonId = `${i}-${buttonInfo.text}-${buttonInfo.ariaLabel}`;
-            
-            // Ignora botões já processados (evita reutilização)
-            if (processedButtonIds.has(buttonId)) {
-              if (validButtonsFound < 5) {
-                Logger.info(`⏭️ Botão ${i + 1} já foi processado anteriormente, ignorando...`);
-              }
-              continue;
-            }
-            
-            validButtonsFound++;
-            actionButtons.push({ 
-              button: button as ElementHandle<HTMLElement>, 
-              status,
-              index: validButtonsFound,
-              buttonId
-            });
-            
-            // Log mais detalhado para os primeiros botões
-            if (validButtonsFound <= 10) {
-              const indicators = [];
-              if (buttonInfo.hasPrivateIndicator) indicators.push('indicador-privado');
-              if (buttonInfo.dataTestid) indicators.push(`data-testid="${buttonInfo.dataTestid}"`);
-              const indicatorText = indicators.length > 0 ? ` [${indicators.join(', ')}]` : '';
-              Logger.info(`✅ Botão ${validButtonsFound} identificado: [${status.toUpperCase()}]${indicatorText} - Texto: "${buttonInfo.text}" | Aria: "${buttonInfo.ariaLabel}" | Classes: "${buttonInfo.classes}"`);
-            } else {
-              Logger.info(`✅ Botão ${validButtonsFound} identificado: [${status.toUpperCase()}] - "${buttonInfo.text || buttonInfo.ariaLabel || 'sem texto'}"`);
-            }
-          } else {
-            // Log para botões não identificados (apenas primeiros para debug)
-            if (i < 5) {
-              Logger.warn(`❓ Botão ${i + 1} não identificado - Texto: "${buttonInfo.text}" | Full: "${buttonInfo.fullText.substring(0, 50)}"`);
-            }
-          }
-          
-          // Armazena informação do botão para debug
-          allButtonsInfo.push({
-            index: i + 1,
-            text: buttonInfo.text,
-            fullText: buttonInfo.fullText.substring(0, 100), // Limita tamanho
-            ariaLabel: buttonInfo.ariaLabel,
-            status: detectedStatus
-          });
-        } catch (err: any) {
-          // Continua para o próximo botão se houver erro
-          continue;
-        }
-      }
-
-      // Detecta se o modal está esgotado antes de processar
-      const invisiblePercentage = totalButtonsChecked > 0 ? invisibleButtonsCount / totalButtonsChecked : 0;
-      const isModalExhausted = 
-        consecutiveInvisibleButtonsCount >= MAX_CONSECUTIVE_INVISIBLE_BUTTONS ||
-        (totalButtonsChecked >= 20 && invisiblePercentage >= MAX_INVISIBLE_BUTTONS_PERCENTAGE);
-      
-      if (isModalExhausted) {
-        Logger.warn(`⚠️ Modal esgotado detectado!`);
-        Logger.warn(`   ├─ Botões invisíveis consecutivos: ${consecutiveInvisibleButtonsCount}/${MAX_CONSECUTIVE_INVISIBLE_BUTTONS}`);
-        Logger.warn(`   ├─ Percentual de botões invisíveis: ${(invisiblePercentage * 100).toFixed(1)}%`);
-        Logger.warn(`   └─ Total de botões verificados: ${totalButtonsChecked}`);
-        Logger.info(`🔄 Fechando modal e preparando para trocar de perfil...`);
-        
-        const actionCount = this.stats.followed + this.stats.requested;
-        return { actionCount, modalExhausted: true };
-      }
-      
-      if (!actionButtons.length) {
-        Logger.info('⚠️ Nenhum botão válido encontrado após análise. Scrollando...');
-        
-        // Verifica se há muitos botões invisíveis mesmo sem botões válidos
-        if (invisiblePercentage >= MAX_INVISIBLE_BUTTONS_PERCENTAGE && totalButtonsChecked >= 20) {
-          Logger.warn(`⚠️ Muitos botões invisíveis (${(invisiblePercentage * 100).toFixed(1)}%). Modal pode estar esgotado.`);
-          noNewContentAttempts++;
-          
-          if (noNewContentAttempts >= MAX_NO_NEW_CONTENT_ATTEMPTS) {
-            Logger.warn(`⚠️ Modal esgotado após ${MAX_NO_NEW_CONTENT_ATTEMPTS} tentativas sem conteúdo novo.`);
-            const actionCount = this.stats.followed + this.stats.requested;
-            return { actionCount, modalExhausted: true };
-          }
-        }
-        
-        await this.scroll(container);
-        await HumanDelay.random(1200, 2500);
-        continue;
-      }
-
-      const seguirCount = actionButtons.filter(b => b.status === 'seguir').length;
-      const seguindoCount = actionButtons.filter(b => b.status === 'seguindo').length;
-      const solicitadoCount = actionButtons.filter(b => b.status === 'solicitado').length;
-      
-      Logger.info(`📋 Total de botões de ação válidos encontrados: ${actionButtons.length} de ${buttons.length} botões na página`);
-      Logger.info(`   ├─ Seguir: ${seguirCount} (${((seguirCount / actionButtons.length) * 100).toFixed(1)}%)`);
-      Logger.info(`   ├─ Seguindo: ${seguindoCount} (${((seguindoCount / actionButtons.length) * 100).toFixed(1)}%)`);
-      Logger.info(`   └─ Solicitado: ${solicitadoCount} (${((solicitadoCount / actionButtons.length) * 100).toFixed(1)}%)`);
-      
-      // Se não encontrou nenhum "Solicitado" ou "Seguindo", avisa e mostra detalhes
-      if (solicitadoCount === 0 && seguindoCount === 0) {
-        Logger.warn(`⚠️ ATENÇÃO: Nenhum botão "Solicitado" ou "Seguindo" foi detectado! Todos estão como "Seguir".`);
-        Logger.warn(`⚠️ Isso pode indicar que a detecção precisa ser ajustada ou não há perfis privados na lista.`);
-        
-        // Mostra informações detalhadas dos primeiros 10 botões não identificados como "solicitado" ou "seguindo"
-        Logger.info(`🔍 DEBUG: Primeiros 10 botões encontrados na página:`);
-        allButtonsInfo.slice(0, 10).forEach(btn => {
-          Logger.info(`   Botão ${btn.index}: Status="${btn.status}" | Texto="${btn.text}" | Aria="${btn.ariaLabel}" | Full="${btn.fullText.substring(0, 60)}"`);
-        });
-      }
-
-      let processedCount = 0;
-      let skippedCount = 0;
-
-      for (let i = 0; i < actionButtons.length; i++) {
-        const { button, status, index, buttonId } = actionButtons[i];
-        
-        // Marca o botão como processado
-        processedButtonIds.add(buttonId);
-        
-        // Log em tempo real do progresso
-        Logger.info(`🔄 Processando botão ${index} (${i + 1}/${actionButtons.length}) [${status.toUpperCase()}]`);
-
-        // Verifica se pode continuar (apenas para "Seguir" o limite importa)
-        if (status === 'seguir' && !HumanClock.canFollow(dailyLimit)) {
-          Logger.warn(`⚠️ Limite diário atingido. Parando processamento de "Seguir"`);
-          break;
-        }
-
-        if (!Runtime.running) break;
-
-        try {
-          // Scrolla até o botão ANTES de verificar visibilidade (importante!)
-          await button.scrollIntoViewIfNeeded().catch(() => {});
-          await HumanDelay.random(300, 600);
-
-          // Verifica se o botão ainda existe na página (pode ter sido removido após scroll)
+          // ✅ VERIFICAÇÃO 1: Botão está visível?
           const isVisible = await button.evaluate(el => {
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
@@ -443,28 +111,233 @@ export class FollowActionUltraHuman {
                    style.opacity !== '0';
           }).catch(() => false);
 
-          if (!isVisible) {
-            Logger.warn(`⚠️ Botão ${index} (${i + 1}/${actionButtons.length}) não está visível após scroll, tentando novamente...`);
-            
-            // Tenta scrollar novamente e verificar
-            await this.scroll(container);
-            await HumanDelay.random(500, 1000);
-            await button.scrollIntoViewIfNeeded().catch(() => {});
-            await HumanDelay.random(300, 600);
-            
-            const retryVisible = await button.evaluate(el => {
-              const rect = el.getBoundingClientRect();
-              return rect.width > 0 && rect.height > 0;
-            }).catch(() => false);
-            
-            if (!retryVisible) {
-              Logger.warn(`⚠️ Botão ${index} ainda não está visível após retry, pulando...`);
-              skippedCount++;
-              continue;
+          // ❌ Se não está visível, descarta IMEDIATAMENTE (não entra no loop)
+          if (!isVisible) continue;
+
+          // Scrolla até o botão para garantir que está na viewport
+          await button.scrollIntoViewIfNeeded().catch(() => {});
+          await HumanDelay.random(100, 200);
+
+          // ✅ VERIFICAÇÃO 2: Identifica o usuário e status do botão
+          const buttonData = await button.evaluate(el => {
+            // Busca o container do usuário (geralmente um <a> ou <div> pai)
+            let userElement: HTMLElement | null = el;
+            let attempts = 0;
+            while (userElement && attempts < 5) {
+              const parent: HTMLElement | null = userElement.parentElement;
+              if (parent) {
+                // Procura por link de perfil ou elemento com username
+                const profileLink = parent.querySelector('a[href*="/"]');
+                if (profileLink) {
+                  const href = profileLink.getAttribute('href') || '';
+                  const usernameMatch = href.match(/\/([^\/\?]+)\/?/);
+                  if (usernameMatch && usernameMatch[1] && !usernameMatch[1].includes('p') && !usernameMatch[1].includes('reel')) {
+                    return {
+                      userId: usernameMatch[1],
+                      profileLink: href
+                    };
+                  }
+                }
+              }
+              userElement = parent;
+              attempts++;
             }
+            return null;
+          }).catch(() => null);
+
+          // Se não conseguiu identificar o usuário, tenta método alternativo
+          let userId = buttonData?.userId || '';
+          if (!userId) {
+            // Método alternativo: usa texto do botão + posição como ID único
+            const buttonText = await button.evaluate(el => {
+              const innerDiv = el.querySelector('div');
+              return innerDiv?.textContent?.trim() || el.textContent?.trim() || '';
+            }).catch(() => '');
+            
+            const buttonIndex = allButtons.indexOf(button);
+            userId = `button_${buttonIndex}_${buttonText.substring(0, 20)}`;
           }
 
-          // 🎯 Lógica separada baseada no status do botão
+          // ✅ VERIFICAÇÃO 3: Botão já foi processado?
+          if (processedUserIds.has(userId)) {
+            continue; // Descarta - já foi processado
+          }
+
+          // ✅ VERIFICAÇÃO 4: Identifica status do botão (Seguir, Seguindo, Solicitado)
+          const buttonInfo = await button.evaluate(el => {
+            const innerDiv = el.querySelector('div');
+            const divs = el.querySelectorAll('div');
+            
+            let allTexts: string[] = [];
+            if (el.textContent) allTexts.push(el.textContent.toLowerCase().trim());
+            if (el.innerText) allTexts.push(el.innerText.toLowerCase().trim());
+            
+            divs.forEach(div => {
+              if (div.textContent) allTexts.push(div.textContent.toLowerCase().trim());
+              if (div.innerText) allTexts.push(div.innerText.toLowerCase().trim());
+            });
+            
+            const ariaLabel = el.getAttribute('aria-label')?.toLowerCase().trim() || '';
+            const title = el.getAttribute('title')?.toLowerCase().trim() || '';
+            const dataTestid = el.getAttribute('data-testid')?.toLowerCase().trim() || '';
+            const classes = Array.from(el.classList).join(' ').toLowerCase();
+            
+            const fullText = [...allTexts, ariaLabel, title, classes, dataTestid].filter(Boolean).join(' ');
+            
+            return {
+              text: allTexts[0] || '',
+              fullText,
+              ariaLabel,
+              classes,
+              dataTestid,
+              hasPrivateIndicator: fullText.includes('private') || 
+                                 fullText.includes('privado') ||
+                                 fullText.includes('solicitado') ||
+                                 fullText.includes('requested') ||
+                                 dataTestid.includes('request')
+            };
+          }).catch(() => ({
+            text: '',
+            fullText: '',
+            ariaLabel: '',
+            classes: '',
+            dataTestid: '',
+            hasPrivateIndicator: false
+          }));
+
+          // Ignora botão "fechar" do modal
+          if (buttonInfo.text === 'fechar' || 
+              buttonInfo.ariaLabel.includes('fechar') ||
+              buttonInfo.classes.includes('close') ||
+              buttonInfo.classes.includes('_abl-')) {
+            continue;
+          }
+
+          // Determina status do botão
+          let status: ButtonStatus = 'unknown';
+          const searchText = buttonInfo.fullText || buttonInfo.text;
+          
+          if (searchText.includes('solicitado') || 
+              searchText.includes('requested') || 
+              searchText.includes('pendente') ||
+              searchText.includes('pending') ||
+              (searchText.includes('cancelar') && (searchText.includes('solicit') || searchText.includes('request'))) ||
+              buttonInfo.hasPrivateIndicator ||
+              buttonInfo.dataTestid.includes('request')) {
+            status = 'solicitado';
+          } else if (searchText.includes('seguindo') || 
+                     searchText === 'following' || 
+                     searchText.includes('unfollow') ||
+                     searchText.includes('parar de seguir')) {
+            status = 'seguindo';
+          } else if (searchText === 'seguir' || 
+                     searchText === 'follow' ||
+                     (searchText.includes('seguir') && !searchText.includes('seguindo') && !searchText.includes('solicit'))) {
+            status = 'seguir';
+          }
+
+          if (status !== 'unknown') {
+            result.push({ button, status, userId });
+          }
+        } catch (err: any) {
+          // Continua para o próximo botão em caso de erro
+          continue;
+        }
+      }
+
+      Logger.info(`✅ Botões válidos encontrados: ${result.length} (visíveis e não processados)`);
+      return result;
+    }
+
+    // 🔁 LOOP PRINCIPAL: Processa ciclos até modal esgotado ou limite atingido
+    while (HumanClock.canFollow(dailyLimit) && Runtime.running) {
+      await HumanDelay.random(500, 1000);
+      
+      // 🔄 CAPTURA DINÂMICA: Busca apenas botões visíveis e não processados
+      const visibleButtons = await getVisibleUnprocessedButtons();
+
+      // ✅ CRITÉRIO REAL DE MODAL ESGOTADO: Nenhum botão novo após múltiplos ciclos
+      if (visibleButtons.length === 0) {
+        noNewButtonsCycles++;
+        Logger.warn(`⚠️ Nenhum botão novo encontrado (ciclo ${noNewButtonsCycles}/${MAX_NO_NEW_BUTTONS_CYCLES})`);
+        
+        if (noNewButtonsCycles >= MAX_NO_NEW_BUTTONS_CYCLES) {
+          Logger.warn(`⚠️ Modal esgotado: ${MAX_NO_NEW_BUTTONS_CYCLES} ciclos consecutivos sem novos botões`);
+          Logger.info(`📊 Ações processadas neste modal: ${actionsProcessedThisModal}`);
+          const actionCount = this.stats.followed + this.stats.requested;
+          return { actionCount, modalExhausted: true };
+        }
+        
+        // Faz scroll controlado e tenta novamente
+        Logger.info(`🔄 Fazendo scroll para carregar mais conteúdo...`);
+        await this.scroll(container);
+        await HumanDelay.random(2000, 3500);
+        continue;
+      }
+
+      // ✅ Reset contador quando encontra novos botões
+      noNewButtonsCycles = 0;
+
+      // 📊 Estatísticas dos botões encontrados
+      const seguirCount = visibleButtons.filter(b => b.status === 'seguir').length;
+      const seguindoCount = visibleButtons.filter(b => b.status === 'seguindo').length;
+      const solicitadoCount = visibleButtons.filter(b => b.status === 'solicitado').length;
+      
+      Logger.info(`📋 Botões válidos encontrados: ${visibleButtons.length}`);
+      Logger.info(`   ├─ Seguir: ${seguirCount}`);
+      Logger.info(`   ├─ Seguindo: ${seguindoCount}`);
+      Logger.info(`   └─ Solicitado: ${solicitadoCount}`);
+
+      // 🔄 PROCESSA APENAS OS BOTÕES NOVOS (visíveis e não processados)
+      let processedThisCycle = 0;
+      let skippedThisCycle = 0;
+
+      for (let i = 0; i < visibleButtons.length; i++) {
+        const { button, status, userId } = visibleButtons[i];
+        
+        // ✅ Marca como processado IMEDIATAMENTE (antes de processar)
+        processedUserIds.add(userId);
+        actionsProcessedThisModal++;
+
+        // Verifica se pode continuar (apenas para "Seguir" o limite importa)
+        if (status === 'seguir' && !HumanClock.canFollow(dailyLimit)) {
+          Logger.warn(`⚠️ Limite diário atingido. Parando processamento.`);
+          const actionCount = this.stats.followed + this.stats.requested;
+          return { actionCount, modalExhausted: false };
+        }
+
+        if (!Runtime.running) {
+          const actionCount = this.stats.followed + this.stats.requested;
+          return { actionCount, modalExhausted: false };
+        }
+
+        try {
+          Logger.info(`🔄 Processando usuário ${i + 1}/${visibleButtons.length} [${status.toUpperCase()}] - ID: ${userId.substring(0, 20)}...`);
+
+          // Scrolla até o botão
+          await button.scrollIntoViewIfNeeded().catch(() => {});
+          await HumanDelay.random(300, 600);
+
+          // ✅ VERIFICAÇÃO FINAL: Botão ainda está visível?
+          const isStillVisible = await button.evaluate(el => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 && 
+                   rect.height > 0 && 
+                   style.display !== 'none' &&
+                   style.visibility !== 'hidden' &&
+                   style.opacity !== '0';
+          }).catch(() => false);
+
+          // ❌ Se não está mais visível, descarta (não tenta retry infinito)
+          if (!isStillVisible) {
+            Logger.warn(`⚠️ Botão não está mais visível após scroll. Descartando.`);
+            skippedThisCycle++;
+            this.stats.skipped++;
+            continue;
+          }
+
+          // 🎯 Processa ação baseada no status
           if (status === 'seguir') {
             await this.handleSeguir(button, page, container, dailyLimit);
           } else if (status === 'seguindo') {
@@ -473,46 +346,36 @@ export class FollowActionUltraHuman {
             await this.handleSolicitado(button, page, container);
           }
 
-          processedCount++;
+          processedThisCycle++;
 
           // Log resumo após cada ação
-          const totalActions = this.stats.followed + this.stats.requested + 
-                              this.stats.seguindoProcessed + this.stats.solicitadoProcessed;
           const stats = HumanClock.getStats();
-          
           const limitInfo = HumanClock.getLimitInfo();
-          Logger.info(`📊 [${i + 1}/${actionButtons.length}] Resumo: Seguidos: ${this.stats.followed} | Solicitações: ${this.stats.requested} (${this.stats.solicitadoProcessed} eram perfis privados) | Seguindo: ${this.stats.seguindoProcessed} | Solicitado: ${this.stats.solicitadoProcessed} | Pulados: ${this.stats.skipped}`);
+          Logger.info(`📊 [${i + 1}/${visibleButtons.length}] Resumo: Seguidos: ${this.stats.followed} | Solicitações: ${this.stats.requested} | Seguindo: ${this.stats.seguindoProcessed} | Solicitado: ${this.stats.solicitadoProcessed} | Pulados: ${this.stats.skipped}`);
           Logger.info(`⏰ Tempo: ${stats.elapsedTime} | Média: ${stats.avgActionsPerHour} ações/hora`);
           Logger.info(`📋 Limites: Diário ${limitInfo.daily.current}/${limitInfo.daily.limit} | Hora ${limitInfo.hourly.current}/${limitInfo.hourly.limit} | Total ${limitInfo.total.current}/${limitInfo.total.limit}`);
 
-          // Intervalo oficial do Instagram (36-48 segundos)
-          // Aguarda APENAS após ações de "Seguir" que foram CONFIRMADAS
-          // E só aguarda ANTES do próximo botão "Seguir" (não bloqueia "Seguindo" ou "Solicitado")
+          // Intervalo oficial do Instagram (36-48 segundos) apenas para "Seguir"
           if (status === 'seguir' && (this.stats.followed > 0 || this.stats.requested > 0)) {
-            // Verifica se o próximo botão também é "Seguir" antes de aguardar intervalo
-            const nextButton = actionButtons[i + 1];
+            const nextButton = visibleButtons[i + 1];
             if (nextButton && nextButton.status === 'seguir') {
               Logger.info(`⏳ Aguardando intervalo oficial antes do próximo "Seguir"...`);
               await HumanClock.waitForNextAction();
             } else {
-              // Se o próximo não é "Seguir" ou não existe, usa delay menor
               await HumanDelay.random(1500, 3000);
             }
           } else {
-            // Para outros status (Seguindo/Solicitado) ou primeiro "Seguir", usa delay menor mas ainda humano
             await HumanDelay.random(1000, 2000);
           }
-          
-          // Scrolla suavemente para garantir que os próximos botões estarão visíveis
-          if (i < actionButtons.length - 1) {
-            // Scroll pequeno para manter os próximos botões visíveis
+
+          // Scroll suave para próximo botão
+          if (i < visibleButtons.length - 1) {
             try {
               if ('evaluate' in container) {
                 await (container as ElementHandle<HTMLElement>).evaluate(el => {
                   el.scrollBy({ top: 100, behavior: 'smooth' });
                 });
               } else {
-                // Se for Page, scrolla no modal
                 const modal = await page.$('div[role="dialog"]');
                 if (modal) {
                   await modal.evaluate(el => {
@@ -526,103 +389,29 @@ export class FollowActionUltraHuman {
             }
           }
 
-          // Verifica pausa longa (a cada 300 ações de "Seguir" - aprox. 10 horas)
+          // Verifica pausas
           const seguirActions = this.stats.followed + this.stats.requested;
           if (seguirActions > 0 && HumanClock.needsLongBreak()) {
             await HumanClock.takeLongBreak();
-          }
-          // Verifica pausa curta (a cada 30 ações de "Seguir" - aprox. 1 hora)
-          else if (seguirActions > 0 && HumanClock.needsShortBreak()) {
+          } else if (seguirActions > 0 && HumanClock.needsShortBreak()) {
             await HumanClock.takeShortBreak();
           }
 
         } catch (err: any) {
-          Logger.warn(`⚠️ Falha no botão ${i + 1} [${status}]: ${err?.message || 'erro desconhecido'}`);
+          Logger.warn(`⚠️ Falha ao processar usuário [${status}]: ${err?.message || 'erro desconhecido'}`);
           this.stats.skipped++;
-          skippedCount++;
+          skippedThisCycle++;
         }
       }
 
-      Logger.info(`✅ Lote processado: ${processedCount} processados, ${skippedCount} pulados de ${actionButtons.length} botões encontrados`);
-      
-      // Estatísticas finais do lote
-      const batchStats = HumanClock.getStats();
-      Logger.info(`⏰ Estatísticas do lote: ${batchStats.elapsedTime} decorridos | Total hoje: ${batchStats.followsToday}/${dailyLimit}`);
+      Logger.info(`✅ Ciclo processado: ${processedThisCycle} processados, ${skippedThisCycle} pulados de ${visibleButtons.length} botões encontrados`);
 
-      // Verifica se não há mais botões "Seguir" para processar (reutiliza variável já declarada acima)
-      const remainingSeguirCount = actionButtons.filter(b => b.status === 'seguir').length;
-      const hasMoreSeguir = remainingSeguirCount > 0;
-
-      // Detecta se não há conteúdo novo sendo carregado
-      const currentButtonsCount = buttons.length;
-      const hasNewContent = currentButtonsCount > lastProcessedButtonsCount;
-      
-      if (!hasNewContent && processedCount > 0) {
-        noNewContentAttempts++;
-        Logger.warn(`⚠️ Nenhum novo conteúdo detectado (tentativa ${noNewContentAttempts}/${MAX_NO_NEW_CONTENT_ATTEMPTS})`);
-      } else {
-        noNewContentAttempts = 0; // Reset contador se há conteúdo novo
-      }
-      
-      lastProcessedButtonsCount = currentButtonsCount;
-
-      // Se não há mais botões "Seguir" OU não há conteúdo novo sendo carregado, tenta scroll limitado
-      if (!hasMoreSeguir || (!hasNewContent && noNewContentAttempts > 0)) {
-        Logger.info(`🔄 Tentando carregar mais conteúdo...`);
-        Logger.info(`   ├─ Botões "Seguir" restantes: ${remainingSeguirCount}`);
-        Logger.info(`   ├─ Conteúdo novo: ${hasNewContent ? 'Sim' : 'Não'}`);
-        Logger.info(`   └─ Tentativas sem conteúdo novo: ${noNewContentAttempts}`);
-        
-        // Se já tentou múltiplas vezes sem sucesso, considera modal esgotado
-        if (noNewContentAttempts >= MAX_NO_NEW_CONTENT_ATTEMPTS) {
-          Logger.warn(`⚠️ Modal esgotado após ${MAX_NO_NEW_CONTENT_ATTEMPTS} tentativas sem conteúdo novo.`);
-          const actionCount = this.stats.followed + this.stats.requested;
-          return { actionCount, modalExhausted: true };
-        }
-        
-        // Faz scroll limitado (máximo 3 tentativas antes de considerar esgotado)
-        const scrollAttempts = Math.min(3, MAX_NO_NEW_CONTENT_ATTEMPTS - noNewContentAttempts);
-        for (let scrollAttempt = 0; scrollAttempt < scrollAttempts; scrollAttempt++) {
-          await this.scroll(container);
-          await HumanDelay.random(1500, 2500);
-          
-          // Tenta scrollar até o final do modal uma vez
-          try {
-            const modal = await page.$('div[role="dialog"]');
-            if (modal) {
-              await modal.evaluate(el => {
-                el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-              });
-              await HumanDelay.random(2000, 3000);
-            }
-          } catch (err) {
-            Logger.warn(`⚠️ Erro ao fazer scroll: ${err}`);
-          }
-        }
-        
-        // Aguarda carregamento de mais conteúdo
-        Logger.info(`⏳ Aguardando carregamento de mais conteúdo no modal...`);
-        await HumanDelay.random(3000, 5000);
-        
-        // Verifica se novos botões foram carregados após o scroll
-        const newButtons = await container.$$('button');
-        Logger.info(`🔍 Após scroll: ${newButtons.length} botões encontrados (antes: ${buttons.length})`);
-        
-        // Se não carregou novos botões após scroll, considera esgotado
-        if (newButtons.length <= buttons.length && noNewContentAttempts >= MAX_NO_NEW_CONTENT_ATTEMPTS - 1) {
-          Logger.warn(`⚠️ Nenhum novo botão foi carregado após scroll. Modal esgotado.`);
-          const actionCount = this.stats.followed + this.stats.requested;
-          return { actionCount, modalExhausted: true };
-        }
-      } else {
-        // Se ainda há botões "Seguir" e há conteúdo novo, faz scroll normal
-        await this.scroll(container);
-      }
-      
-      // Intervalo humano antes de buscar novos botões
+      // Scroll controlado antes do próximo ciclo
+      await this.scroll(container);
       await HumanDelay.random(2000, 4000);
     }
 
+    // Se saiu do loop por limite ou Runtime.running = false
     const finalStats = HumanClock.getStats();
     const actionCount = this.stats.followed + this.stats.requested;
     
@@ -631,7 +420,6 @@ export class FollowActionUltraHuman {
     );
     Logger.info(`⏰ Tempo total: ${finalStats.elapsedTime} | Média: ${finalStats.avgActionsPerHour} ações/hora | Total hoje: ${finalStats.followsToday}/${dailyLimit}`);
 
-    // Retorna resultado indicando que o modal não está esgotado (limite diário atingido ou Runtime.running = false)
     return { actionCount, modalExhausted: false };
   }
 
