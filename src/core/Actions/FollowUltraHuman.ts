@@ -17,6 +17,11 @@ interface FollowStats {
 
 type ButtonStatus = 'seguir' | 'seguindo' | 'solicitado' | 'unknown';
 
+export type ExecuteResult = {
+  actionCount: number;
+  modalExhausted: boolean;
+};
+
 export class FollowActionUltraHuman {
   private static stats: FollowStats = {
     followed: 0,
@@ -51,7 +56,7 @@ export class FollowActionUltraHuman {
     return this.stats.solicitadoProcessed;
   }
 
-  static async execute(container: Container, dailyLimit = 150): Promise<number> {
+  static async execute(container: Container, dailyLimit = 150): Promise<ExecuteResult> {
     Logger.action(`▶️ Follow Ultra-Human iniciado (máx ${dailyLimit}/dia)`);
     
     // Inicializa o HumanClock se ainda não foi inicializado
@@ -63,6 +68,19 @@ export class FollowActionUltraHuman {
     const initialStats = HumanClock.getStats();
     Logger.info(`⏰ Estatísticas da sessão: ${initialStats.elapsedTime} decorridos, média: ${initialStats.avgActionsPerHour} ações/hora`);
 
+    // Rastreia quantos botões foram processados na última iteração para detectar quando não há mais conteúdo novo
+    let lastProcessedButtonsCount = 0;
+    let noNewContentAttempts = 0;
+    const MAX_NO_NEW_CONTENT_ATTEMPTS = 3;
+    
+    // Rastreia botões invisíveis para detectar modal esgotado
+    let consecutiveInvisibleButtonsCount = 0;
+    const MAX_CONSECUTIVE_INVISIBLE_BUTTONS = 15; // Se 15+ botões consecutivos invisíveis, modal está esgotado
+    const MAX_INVISIBLE_BUTTONS_PERCENTAGE = 0.7; // Se 70%+ dos botões são invisíveis, modal está esgotado
+    
+    // Rastreia botões já processados para evitar reutilização
+    const processedButtonIds = new Set<string>();
+
     while (HumanClock.canFollow(dailyLimit) && Runtime.running) {
       // Aguarda um pouco para garantir que a página renderizou
       await HumanDelay.random(500, 1000);
@@ -70,15 +88,19 @@ export class FollowActionUltraHuman {
       const buttons = await container.$$('button');
       Logger.info(`🔍 Encontrados ${buttons.length} botões na página`);
       
-      const actionButtons: Array<{ button: ElementHandle<HTMLElement>; status: ButtonStatus; index: number }> = [];
+      const actionButtons: Array<{ button: ElementHandle<HTMLElement>; status: ButtonStatus; index: number; buttonId: string }> = [];
       const allButtonsInfo: Array<{ index: number; text: string; fullText: string; ariaLabel: string; status: ButtonStatus | 'unknown' }> = [];
       let validButtonsFound = 0;
+      let invisibleButtonsCount = 0;
+      let totalButtonsChecked = 0;
 
       // Identifica o status de cada botão (Seguir, Seguindo, ou Solicitado)
       for (let i = 0; i < buttons.length; i++) {
         const button = buttons[i];
         
         try {
+          totalButtonsChecked++;
+          
           // Verifica se o botão está visível
           const isVisible = await button.evaluate(el => {
             const rect = el.getBoundingClientRect();
@@ -87,7 +109,14 @@ export class FollowActionUltraHuman {
                    window.getComputedStyle(el).visibility !== 'hidden';
           }).catch(() => false);
 
-          if (!isVisible) continue;
+          if (!isVisible) {
+            invisibleButtonsCount++;
+            consecutiveInvisibleButtonsCount++;
+            continue;
+          }
+          
+          // Reset contador de botões invisíveis consecutivos quando encontra um visível
+          consecutiveInvisibleButtonsCount = 0;
 
           // Scrolla até o botão para garantir que está visível antes de ler
           await button.scrollIntoViewIfNeeded().catch(() => {});
@@ -270,11 +299,23 @@ export class FollowActionUltraHuman {
           detectedStatus = status;
 
           if (status !== 'unknown') {
+            // Gera um ID único para o botão baseado em sua posição e texto
+            const buttonId = `${i}-${buttonInfo.text}-${buttonInfo.ariaLabel}`;
+            
+            // Ignora botões já processados (evita reutilização)
+            if (processedButtonIds.has(buttonId)) {
+              if (validButtonsFound < 5) {
+                Logger.info(`⏭️ Botão ${i + 1} já foi processado anteriormente, ignorando...`);
+              }
+              continue;
+            }
+            
             validButtonsFound++;
             actionButtons.push({ 
               button: button as ElementHandle<HTMLElement>, 
               status,
-              index: validButtonsFound
+              index: validButtonsFound,
+              buttonId
             });
             
             // Log mais detalhado para os primeiros botões
@@ -308,8 +349,38 @@ export class FollowActionUltraHuman {
         }
       }
 
+      // Detecta se o modal está esgotado antes de processar
+      const invisiblePercentage = totalButtonsChecked > 0 ? invisibleButtonsCount / totalButtonsChecked : 0;
+      const isModalExhausted = 
+        consecutiveInvisibleButtonsCount >= MAX_CONSECUTIVE_INVISIBLE_BUTTONS ||
+        (totalButtonsChecked >= 20 && invisiblePercentage >= MAX_INVISIBLE_BUTTONS_PERCENTAGE);
+      
+      if (isModalExhausted) {
+        Logger.warn(`⚠️ Modal esgotado detectado!`);
+        Logger.warn(`   ├─ Botões invisíveis consecutivos: ${consecutiveInvisibleButtonsCount}/${MAX_CONSECUTIVE_INVISIBLE_BUTTONS}`);
+        Logger.warn(`   ├─ Percentual de botões invisíveis: ${(invisiblePercentage * 100).toFixed(1)}%`);
+        Logger.warn(`   └─ Total de botões verificados: ${totalButtonsChecked}`);
+        Logger.info(`🔄 Fechando modal e preparando para trocar de perfil...`);
+        
+        const actionCount = this.stats.followed + this.stats.requested;
+        return { actionCount, modalExhausted: true };
+      }
+      
       if (!actionButtons.length) {
         Logger.info('⚠️ Nenhum botão válido encontrado após análise. Scrollando...');
+        
+        // Verifica se há muitos botões invisíveis mesmo sem botões válidos
+        if (invisiblePercentage >= MAX_INVISIBLE_BUTTONS_PERCENTAGE && totalButtonsChecked >= 20) {
+          Logger.warn(`⚠️ Muitos botões invisíveis (${(invisiblePercentage * 100).toFixed(1)}%). Modal pode estar esgotado.`);
+          noNewContentAttempts++;
+          
+          if (noNewContentAttempts >= MAX_NO_NEW_CONTENT_ATTEMPTS) {
+            Logger.warn(`⚠️ Modal esgotado após ${MAX_NO_NEW_CONTENT_ATTEMPTS} tentativas sem conteúdo novo.`);
+            const actionCount = this.stats.followed + this.stats.requested;
+            return { actionCount, modalExhausted: true };
+          }
+        }
+        
         await this.scroll(container);
         await HumanDelay.random(1200, 2500);
         continue;
@@ -340,7 +411,10 @@ export class FollowActionUltraHuman {
       let skippedCount = 0;
 
       for (let i = 0; i < actionButtons.length; i++) {
-        const { button, status, index } = actionButtons[i];
+        const { button, status, index, buttonId } = actionButtons[i];
+        
+        // Marca o botão como processado
+        processedButtonIds.add(buttonId);
         
         // Log em tempo real do progresso
         Logger.info(`🔄 Processando botão ${index} (${i + 1}/${actionButtons.length}) [${status.toUpperCase()}]`);
@@ -475,18 +549,90 @@ export class FollowActionUltraHuman {
       const batchStats = HumanClock.getStats();
       Logger.info(`⏰ Estatísticas do lote: ${batchStats.elapsedTime} decorridos | Total hoje: ${batchStats.followsToday}/${dailyLimit}`);
 
-      await this.scroll(container);
+      // Verifica se não há mais botões "Seguir" para processar (reutiliza variável já declarada acima)
+      const remainingSeguirCount = actionButtons.filter(b => b.status === 'seguir').length;
+      const hasMoreSeguir = remainingSeguirCount > 0;
+
+      // Detecta se não há conteúdo novo sendo carregado
+      const currentButtonsCount = buttons.length;
+      const hasNewContent = currentButtonsCount > lastProcessedButtonsCount;
+      
+      if (!hasNewContent && processedCount > 0) {
+        noNewContentAttempts++;
+        Logger.warn(`⚠️ Nenhum novo conteúdo detectado (tentativa ${noNewContentAttempts}/${MAX_NO_NEW_CONTENT_ATTEMPTS})`);
+      } else {
+        noNewContentAttempts = 0; // Reset contador se há conteúdo novo
+      }
+      
+      lastProcessedButtonsCount = currentButtonsCount;
+
+      // Se não há mais botões "Seguir" OU não há conteúdo novo sendo carregado, tenta scroll limitado
+      if (!hasMoreSeguir || (!hasNewContent && noNewContentAttempts > 0)) {
+        Logger.info(`🔄 Tentando carregar mais conteúdo...`);
+        Logger.info(`   ├─ Botões "Seguir" restantes: ${remainingSeguirCount}`);
+        Logger.info(`   ├─ Conteúdo novo: ${hasNewContent ? 'Sim' : 'Não'}`);
+        Logger.info(`   └─ Tentativas sem conteúdo novo: ${noNewContentAttempts}`);
+        
+        // Se já tentou múltiplas vezes sem sucesso, considera modal esgotado
+        if (noNewContentAttempts >= MAX_NO_NEW_CONTENT_ATTEMPTS) {
+          Logger.warn(`⚠️ Modal esgotado após ${MAX_NO_NEW_CONTENT_ATTEMPTS} tentativas sem conteúdo novo.`);
+          const actionCount = this.stats.followed + this.stats.requested;
+          return { actionCount, modalExhausted: true };
+        }
+        
+        // Faz scroll limitado (máximo 3 tentativas antes de considerar esgotado)
+        const scrollAttempts = Math.min(3, MAX_NO_NEW_CONTENT_ATTEMPTS - noNewContentAttempts);
+        for (let scrollAttempt = 0; scrollAttempt < scrollAttempts; scrollAttempt++) {
+          await this.scroll(container);
+          await HumanDelay.random(1500, 2500);
+          
+          // Tenta scrollar até o final do modal uma vez
+          try {
+            const modal = await page.$('div[role="dialog"]');
+            if (modal) {
+              await modal.evaluate(el => {
+                el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+              });
+              await HumanDelay.random(2000, 3000);
+            }
+          } catch (err) {
+            Logger.warn(`⚠️ Erro ao fazer scroll: ${err}`);
+          }
+        }
+        
+        // Aguarda carregamento de mais conteúdo
+        Logger.info(`⏳ Aguardando carregamento de mais conteúdo no modal...`);
+        await HumanDelay.random(3000, 5000);
+        
+        // Verifica se novos botões foram carregados após o scroll
+        const newButtons = await container.$$('button');
+        Logger.info(`🔍 Após scroll: ${newButtons.length} botões encontrados (antes: ${buttons.length})`);
+        
+        // Se não carregou novos botões após scroll, considera esgotado
+        if (newButtons.length <= buttons.length && noNewContentAttempts >= MAX_NO_NEW_CONTENT_ATTEMPTS - 1) {
+          Logger.warn(`⚠️ Nenhum novo botão foi carregado após scroll. Modal esgotado.`);
+          const actionCount = this.stats.followed + this.stats.requested;
+          return { actionCount, modalExhausted: true };
+        }
+      } else {
+        // Se ainda há botões "Seguir" e há conteúdo novo, faz scroll normal
+        await this.scroll(container);
+      }
+      
       // Intervalo humano antes de buscar novos botões
       await HumanDelay.random(2000, 4000);
     }
 
     const finalStats = HumanClock.getStats();
+    const actionCount = this.stats.followed + this.stats.requested;
+    
     Logger.success(
-      `🎯 Sessão finalizada | Seguidos: ${this.stats.followed} | Solicitações: ${this.stats.requested} | Seguindo processados: ${this.stats.seguindoProcessed} | Solicitado processados: ${this.stats.solicitadoProcessed} | Pulados: ${this.stats.skipped}`
+      `🎯 Processamento do modal finalizado | Seguidos: ${this.stats.followed} | Solicitações: ${this.stats.requested} | Seguindo processados: ${this.stats.seguindoProcessed} | Solicitado processados: ${this.stats.solicitadoProcessed} | Pulados: ${this.stats.skipped}`
     );
     Logger.info(`⏰ Tempo total: ${finalStats.elapsedTime} | Média: ${finalStats.avgActionsPerHour} ações/hora | Total hoje: ${finalStats.followsToday}/${dailyLimit}`);
 
-    return this.stats.followed + this.stats.requested;
+    // Retorna resultado indicando que o modal não está esgotado (limite diário atingido ou Runtime.running = false)
+    return { actionCount, modalExhausted: false };
   }
 
   /**
